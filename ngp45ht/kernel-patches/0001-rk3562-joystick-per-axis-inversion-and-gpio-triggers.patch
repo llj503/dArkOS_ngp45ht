@@ -1,0 +1,251 @@
+diff --git a/drivers/input/joystick/rk3562-joystick.c b/drivers/input/joystick/rk3562-joystick.c
+index 121c6af66..f922e730d 100644
+--- a/drivers/input/joystick/rk3562-joystick.c
++++ b/drivers/input/joystick/rk3562-joystick.c
+@@ -106,6 +106,12 @@ struct rk3562_joystick {
+ 	struct iio_channel *trig_chans[NUM_TRIG_CHANS];
+ 	struct iio_channel *adc_btn_chans[NUM_ADC_BTNS];
+ 
++	/* Channels actually present in the DT.  Triggers and ADC buttons are
++	 * optional: boards whose shoulders/d-pad/face buttons are all on GPIO
++	 * (e.g. NGP45HT) declare only the 4 stick channels. */
++	int num_trig;
++	int num_adc_btn;
++
+ 	/* GPIO buttons (IRQ-driven, dynamically sized) */
+ 	struct rk3562_gpio_btn *gpio_btns;
+ 	int num_gpio_btns;
+@@ -137,6 +143,12 @@ struct rk3562_joystick {
+ 	 * module is physically rotated 180 degrees, e.g. RG52 Mini) */
+ 	bool left_stick_invert;
+ 
++	/* Per-axis polarity inversion (DT: invert-x/-y/-rx/-ry) */
++	bool inv_absx;
++	bool inv_absy;
++	bool inv_abtrx;
++	bool inv_abtry;
++
+ 	/* Rumble motors (optional) */
+ 	struct gpio_desc *moto_gpio;
+ 	struct gpio_desc *moto_r_gpio;
+@@ -222,6 +234,27 @@ static unsigned int rk3562_stick_code(struct rk3562_joystick *joy, int i)
+ 	}
+ }
+ 
++/*
++ * Whether the value reported on @code has to be negated.
++ * "left-stick-invert" is the legacy both-axes flag and stays runtime
++ * switchable through sysfs; invert-x/-y/-rx/-ry are per-axis DT flags for
++ * boards whose stick modules are mounted rotated by 90 degrees, where one
++ * axis ends up wired with the opposite polarity from the other.
++ */
++static bool rk3562_invert_axis(struct rk3562_joystick *joy, unsigned int code)
++{
++	if (joy->left_stick_invert && (code == ABS_X || code == ABS_Y))
++		return true;
++
++	switch (code) {
++	case ABS_X:  return joy->inv_absx;
++	case ABS_Y:  return joy->inv_absy;
++	case ABS_RX: return joy->inv_abtrx;
++	case ABS_RY: return joy->inv_abtry;
++	default:     return false;
++	}
++}
++
+ /*
+  * Map a raw microvolt ADC reading to the [-32767, 32767] axis range.
+  * Values within the per-axis dead zone map to 0.
+@@ -312,6 +345,23 @@ static void rk3562_gpio_work_func(struct work_struct *work)
+ 	}
+ 
+ 	input_report_key(joy->input, btn->code, val);
++
++	/*
++	 * SDL's GameController API resolves left/righttrigger to the ABS_Z/ABS_RZ
++	 * axes and never surfaces BTN_TL2/BTN_TR2, so on boards where the
++	 * shoulders are plain GPIO switches -- no SARADC trigger channel to drive
++	 * those axes -- L2/R2 are invisible to PPSSPP and every other
++	 * controller-API consumer.  Drive the axes from the switch instead.
++	 */
++	if (!joy->num_trig) {
++		if (btn->code == BTN_TL2)
++			input_report_abs(joy->input, ABS_Z,
++					 val ? TRIG_MAX : TRIG_MIN);
++		else if (btn->code == BTN_TR2)
++			input_report_abs(joy->input, ABS_RZ,
++					 val ? TRIG_MAX : TRIG_MIN);
++	}
++
+ 	input_sync(joy->input);
+ }
+ 
+@@ -514,7 +564,7 @@ static void rk3562_poll(struct input_dev *input)
+ 	/* Step 2: Read and report triggers as both an analog axis (ABS_Z/
+ 	 * ABS_RZ) and a thresholded digital button (BTN_TL2/BTN_TR2) with
+ 	 * hysteresis, so analog- and digital-L2/R2 consumers both work. */
+-	for (i = 0; i < NUM_TRIG_CHANS; i++) {
++	for (i = 0; i < joy->num_trig; i++) {
+ 		int mapped;
+ 
+ 		ret = iio_read_channel_processed(joy->trig_chans[i], &raw);
+@@ -537,7 +587,7 @@ static void rk3562_poll(struct input_dev *input)
+ 	}
+ 
+ 	/* Step 3: Read and report ADC-threshold buttons */
+-	for (i = 0; i < NUM_ADC_BTNS; i++) {
++	for (i = 0; i < joy->num_adc_btn; i++) {
+ 		ret = iio_read_channel_processed(joy->adc_btn_chans[i], &raw);
+ 		if (ret < 0)
+ 			continue;
+@@ -558,8 +608,7 @@ static void rk3562_poll(struct input_dev *input)
+ 			int val = stick_vals[i];
+ 			unsigned int code = rk3562_stick_code(joy, i);
+ 
+-			if (joy->left_stick_invert &&
+-			    (code == ABS_X || code == ABS_Y))
++			if (rk3562_invert_axis(joy, code))
+ 				val = -val;
+ 
+ 			if (code == ABS_X)
+@@ -608,8 +657,7 @@ static void rk3562_poll(struct input_dev *input)
+ 			 * left stick module is physically rotated 180
+ 			 * degrees (ribbon cable faces inward), giving
+ 			 * opposite voltage polarity from the right stick. */
+-			if (joy->left_stick_invert &&
+-			    (code == ABS_X || code == ABS_Y))
++			if (rk3562_invert_axis(joy, code))
+ 				val = -val;
+ 
+ 			input_report_abs(input, code, val);
+@@ -698,7 +746,7 @@ static void rk3562_calibrate(struct rk3562_joystick *joy)
+ 	}
+ 
+ 	/* Calibrate trigger resting voltages */
+-	for (i = 0; i < NUM_TRIG_CHANS; i++) {
++	for (i = 0; i < joy->num_trig; i++) {
+ 		rest_mv = rk3562_read_avg(joy->trig_chans[i],
+ 					  CALIBRATION_SAMPLES);
+ 		if (rest_mv < 0) {
+@@ -752,11 +800,9 @@ static int rk3562_parse_adc_buttons(struct rk3562_joystick *joy,
+ 		i++;
+ 	}
+ 
+-	if (i != NUM_ADC_BTNS) {
+-		dev_err(dev, "Expected %d ADC button children, found %d\n",
+-			NUM_ADC_BTNS, i);
+-		return -EINVAL;
+-	}
++	/* Report only as many ADC buttons as both a channel and a child node */
++	if (i < joy->num_adc_btn)
++		joy->num_adc_btn = i;
+ 
+ 	return 0;
+ }
+@@ -817,6 +863,27 @@ static int rk3562_resume(struct device *dev)
+ 
+ static SIMPLE_DEV_PM_OPS(rk3562_pm_ops, rk3562_suspend, rk3562_resume);
+ 
++/*
++ * Acquire an IIO channel by name, treating channels this board does not wire
++ * up as absent instead of as probe failures.  Returns NULL when the name is
++ * not listed in io-channel-names, and bumps *count on success.
++ */
++static struct iio_channel *rk3562_get_named_channel(struct device *dev,
++						   const char *name, int *count)
++{
++	struct iio_channel *chan;
++
++	if (of_property_match_string(dev->of_node, "io-channel-names", name) < 0)
++		return NULL;
++
++	chan = devm_iio_channel_get(dev, name);
++	if (IS_ERR(chan))
++		return chan;
++
++	(*count)++;
++	return chan;
++}
++
+ /* --- Probe --- */
+ 
+ static int rk3562_probe(struct platform_device *pdev)
+@@ -856,6 +923,12 @@ static int rk3562_probe(struct platform_device *pdev)
+ 	joy->left_stick_invert = of_property_read_bool(dev->of_node,
+ 						       "left-stick-invert");
+ 
++	/* Per-axis polarity inversion */
++	joy->inv_absx = of_property_read_bool(dev->of_node, "invert-x");
++	joy->inv_absy = of_property_read_bool(dev->of_node, "invert-y");
++	joy->inv_abtrx = of_property_read_bool(dev->of_node, "invert-rx");
++	joy->inv_abtry = of_property_read_bool(dev->of_node, "invert-ry");
++
+ 	/* Stick calibration (millivolts -> microvolts) */
+ 	if (of_property_read_u32(dev->of_node, "axis-min-value-mv",
+ 				 &axis_min_mv))
+@@ -904,25 +977,23 @@ static int rk3562_probe(struct platform_device *pdev)
+ 	}
+ 
+ 	for (i = 0; i < NUM_TRIG_CHANS; i++) {
+-		joy->trig_chans[i] = devm_iio_channel_get(dev,
+-							   trig_chan_names[i]);
++		joy->trig_chans[i] = rk3562_get_named_channel(dev,
++					trig_chan_names[i], &joy->num_trig);
+ 		if (IS_ERR(joy->trig_chans[i])) {
+ 			ret = PTR_ERR(joy->trig_chans[i]);
+-			if (ret != -EPROBE_DEFER)
+-				dev_err(dev, "Failed to get IIO channel %s: %d\n",
+-					trig_chan_names[i], ret);
++			dev_err(dev, "Failed to get IIO channel %s: %d\n",
++				trig_chan_names[i], ret);
+ 			return ret;
+ 		}
+ 	}
+ 
+ 	for (i = 0; i < NUM_ADC_BTNS; i++) {
+-		joy->adc_btn_chans[i] = devm_iio_channel_get(dev,
+-							      adc_btn_chan_names[i]);
++		joy->adc_btn_chans[i] = rk3562_get_named_channel(dev,
++					adc_btn_chan_names[i], &joy->num_adc_btn);
+ 		if (IS_ERR(joy->adc_btn_chans[i])) {
+ 			ret = PTR_ERR(joy->adc_btn_chans[i]);
+-			if (ret != -EPROBE_DEFER)
+-				dev_err(dev, "Failed to get IIO channel %s: %d\n",
+-					adc_btn_chan_names[i], ret);
++			dev_err(dev, "Failed to get IIO channel %s: %d\n",
++				adc_btn_chan_names[i], ret);
+ 			return ret;
+ 		}
+ 	}
+@@ -1061,13 +1132,20 @@ static int rk3562_probe(struct platform_device *pdev)
+ 
+ 	input_set_drvdata(input, joy);
+ 
+-	/* Register stick axes */
++	/* Register stick axes and the two trigger axes unconditionally.
++	 *
++	 * Boards without analog shoulders (e.g. NGP45HT, where L2/R2 are plain
++	 * GPIO) still get ABS_Z/ABS_RZ advertised, just never driven, so joydev
++	 * hands out the same axis indices on every RK3562 device:
++	 * 0=LX 1=LY 2=L2 3=RX 4=RY 5=R2.  gamecontrollerdb, es_input.cfg,
++	 * retroarch autoconfig and the mupen/dolphin bindings are all keyed on
++	 * those indices, so dropping the axes here would silently remap the
++	 * right stick on such boards. */
+ 	for (i = 0; i < NUM_STICK_CHANS; i++) {
+ 		input_set_abs_params(input, stick_abs_codes[i],
+ 				     AXIS_MIN, AXIS_MAX, 16, 128);
+ 	}
+ 
+-	/* Register trigger axes (calibration makes large fuzz/flat unnecessary) */
+ 	for (i = 0; i < NUM_TRIG_CHANS; i++) {
+ 		input_set_abs_params(input, trig_abs_codes[i],
+ 				     TRIG_MIN, TRIG_MAX,
+@@ -1080,7 +1158,7 @@ static int rk3562_probe(struct platform_device *pdev)
+ 		input_set_capability(input, EV_KEY, joy->gpio_btns[i].code);
+ 
+ 	/* Register ADC buttons */
+-	for (i = 0; i < NUM_ADC_BTNS; i++)
++	for (i = 0; i < joy->num_adc_btn; i++)
+ 		input_set_capability(input, EV_KEY, joy->adc_btn_codes[i]);
+ 
+ 	/* Always register BTN_TL2, BTN_TR2, and BTN_MODE so joydev assigns

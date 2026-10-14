@@ -1,15 +1,18 @@
-# <p align="center">Welcome to dArkOS (RK3562 Fork)</p>
+# <p align="center">dArkOS for the XIFAN NGP45HT</p>
 
-### <p align="center">Fork of dArkOS adding support for AISLPC's RK3562-based handhelds: the RG52 Mini and RG43 Pro.</p>
+### <p align="center">XIFAN NGP45HT（RK3562 掌机）的 dArkOS 移植<br>A dArkOS port for the XIFAN NGP45HT handheld</p>
 
-This is a fork of [christianhaitian's dArkOS](https://github.com/christianhaitian/dArkOS), a Debian-based gaming OS derived from [ArkOS](https://github.com/christianhaitian/arkos/wiki). The upstream project targets RK3326 and RK3566 devices. This fork adds support for [AISLPC](https://aislpc.com/)'s Rockchip RK3562-based handhelds:
+这是 [christianhaitian's dArkOS](https://github.com/christianhaitian/dArkOS)（Debian 游戏机系统，源自 [ArkOS](https://github.com/christianhaitian/arkos/wiki)）针对 **XIFAN NGP45HT** 掌机的移植，基线是加入 RK3562 支持的 [dArkOS_rg52mini](https://github.com/bmdhacks/dArkOS_rg52mini) fork。NGP45HT 的板级内容（设备树、defconfig、摇杆/按键驱动、rootfs 修正与构建脚本）都在 [`ngp45ht/`](ngp45ht/README.md) 里。
 
-| Device | Screen | SoC | RAM |
-|--------|--------|-----|-----|
-| [RG52 Mini](https://aislpc.com/products/rg52mini-retro-handheld-game-console) | 5.5" IPS 1280x720 | RK3562 (4x Cortex-A53 @ 2.0GHz) | 2GB |
-| RG43 Pro | 4.3" IPS 1024x768 | RK3562 (4x Cortex-A53 @ 2.0GHz) | 1GB |
+This is a fork of [christianhaitian's dArkOS](https://github.com/christianhaitian/dArkOS), a Debian-based gaming OS derived from [ArkOS](https://github.com/christianhaitian/arkos/wiki), carried on top of the RK3562 fork that added the RG52 Mini and RG43 Pro. Its own target is the XIFAN NGP45HT; see [`ngp45ht/README.md`](ngp45ht/README.md) for the board.
 
-Both devices use the Rockchip RK3562 SoC with a Mali Bifrost G52 GPU, and ship with EmuELEC as stock firmware. This fork replaces the stock OS with a full Debian Trixie userspace running EmulationStation-fcamod, RetroArch, and 50+ standalone emulators.
+| Device | Screen | SoC | RAM | |
+|--------|--------|-----|-----|-|
+| **XIFAN NGP45HT** | 1024x768 landscape-native DSI | RK3562 (4x Cortex-A53 @ 2.0GHz) | 2GB | this repo's target |
+| [RG52 Mini](https://aislpc.com/products/rg52mini-retro-handheld-game-console) | 5.5" IPS 1280x720 | RK3562 (4x Cortex-A53 @ 2.0GHz) | 2GB | base fork's target |
+| RG43 Pro | 4.3" IPS 1024x768 | RK3562 (4x Cortex-A53 @ 2.0GHz) | 1GB | base fork's target, same SoC + panel as the NGP45HT |
+
+All three use the Rockchip RK3562 SoC with a Mali Bifrost G52 GPU, and ship with EmuELEC as stock firmware. dArkOS replaces the stock OS with a full Debian Trixie userspace running EmulationStation-fcamod, RetroArch, and 50+ standalone emulators.
 
 ---
 
