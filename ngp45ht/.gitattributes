@@ -1,0 +1,11 @@
+# Line endings are LF here on purpose: build.sh/apply.sh run under WSL and the
+# kernel patches are fed to `git apply`, both of which break on CRLF.
+*.sh    text eol=lf
+*.py    text eol=lf
+*.patch text eol=lf
+*.dts   text eol=lf
+*.dtsi  text eol=lf
+*.tpl   text eol=lf
+*.cfg   text eol=lf
+ngp45ht_defconfig text eol=lf
+README.md text eol=lf
