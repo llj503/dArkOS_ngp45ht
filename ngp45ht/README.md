@@ -90,16 +90,24 @@ RetroArch 本体没什么可升：卡上是 `1.22.2 (Jun 3 2026)`，而 v1.22.2 
 ```bash
 python devsh.py ngp-core-update.sh plan                # 只看 .index-extended，谁落后
 python devsh.py ngp-core-update.sh check <core> ...     # 下载并比对字节
-python devsh.py ngp-core-update.sh install <core> ...   # 备份后替换 + md5 校验
-python devsh.py ngp-core-update.sh compare              # 与备份做差分 dlopen
+python devsh.py ngp-core-update.sh install <core> ...   # 备份后替换 + md5 + RA 加载验收，打不开自动回滚
+python devsh.py ngp-core-update.sh raload <core> ...    # 权威验收：让 RetroArch 自己加载每个内核
+python devsh.py ngp-core-update.sh compare              # 与备份做差分 dlopen（advisory）
 ```
+刷了 20261015 镜像的卡不用从 PC 走：工具就在 `/usr/local/sbin/ngp-core-update.sh`，
+`sudo /usr/local/sbin/ngp-core-update.sh plan` 直接可用（`devsh.py` 只是把它推上去再跑）。
 
-验收只能看**差分**。`verify` 是在 RetroArch 之外 dlopen 每个内核，而很多内核的依赖是 RetroArch 自己带进进程的
-（`mame`/`ppsspp`/`stella`/`easyrpg`/`vircon32`/`dosbox_pure`/`hatarib`/`emuscv`/`mess` 都会报 undefined symbol
-却在界面里跑得好好的），所以绝对成败没有意义，`compare`（新版 vs 备份）才有意义。它抓到 `DoubleCherryGB`
-（缺 `utf8skip`）和 `np2kai`（缺 `ymzadpcm_getpcm`）换新版后反而引用了卡上没有的符号 —— 两个都回滚了；也抓到
-**旧版 `fake08` 本身就是 SIGILL（rc=132）、新版能加载** —— 等于这次升级顺手修好了一个从来不能用的内核。
-每个内核单独起进程就是为了 rc=132 只杀自己、不掩盖元凶。
+验收要看 **`raload`**。它让 RetroArch 自己去 dlopen 每个内核，跑在临时 `HOME=/tmp/rahome` 里，
+`video_driver`/`audio_driver`/`input_driver` 全设 `null` 且 `save_config_on_exit = "disabled"`，所以既不写你现在的
+`retroarch.cfg`，也不抢面板的 DRM；内核加载成功后会自己打横幅（fbneo 是 `[FBNeo] Running v1.0.0.03 260904
+GITa251c7622`），而 `requires content, but nothing was provided` 这句就是"加载成功"。
+`verify`/`compare` 用裸 ctypes dlopen，只能当参考：RetroArch 自己的进程已经带了 libstdc++、libiconv 这些依赖，
+所以 `mame`/`ppsspp`/`stella`/`easyrpg`/`vircon32`/`dosbox_pure`/`hatarib`/`emuscv`/`mess` 九颗明明正常的内核会被
+报 undefined symbol —— 我就因此**误回滚过一次** `DoubleCherryGB`（它其实加载得好好的，后来按 RA 验收重新装上了）。
+真正不行的是 `np2kai`：新版能装、md5 也对，但 RetroArch 直接 `Failed to open libretro core`（缺
+`ymzadpcm_getpcm`），所以它保持镜像里的旧版。`install` 现在每装一颗就用这套 RA 探测验收，打不开就自动恢复刚备份的
+旧版 —— "更新"不等于"能加载"。同一次扫描还发现**旧版 `fake08` 本身就是 SIGILL（rc=132）、从来加载不了**，新版才
+正常；每个内核单独起进程就是为了让它只杀自己、不掩盖元凶。最终：48 颗升级并通过 RA 加载测试，`np2kai` 保留旧版。
 
 备份目录默认 `/roms/core-backups/<日期>-64`：根分区只剩 5.8 GB，而 `mame_libretro.so` 单文件就 200 MB。
 

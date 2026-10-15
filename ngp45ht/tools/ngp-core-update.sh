@@ -11,8 +11,10 @@
 #   ngp-core-update.sh check [a b ...]   also download and compare bytes (all if none named)
 #   ngp-core-update.sh install [a b ...] back up, replace, refresh the .info
 #   ngp-core-update.sh rollback [a b ...] restore the newest backup
-#   ngp-core-update.sh verify             dlopen every core and report failures
-#   ngp-core-update.sh compare            same probe on the backups, only the differences
+#   ngp-core-update.sh verify             dlopen every core and report failures (advisory: RetroArch
+#                                         provides symbols a bare dlopen cannot see, so it false-fails)
+#   ngp-core-update.sh compare            same probe on the backups, only the differences (advisory)
+#   ngp-core-update.sh raload <core...>   authoritative: RetroArch itself opens each core
 #   ngp-core-update.sh --32 ...          same against the armhf core dir
 #
 # Runs as ark: cores live under /home/ark, backups under /roms (31 GB free, the
@@ -93,6 +95,27 @@ except OSError as e:
     echo "rc=$rc ${out:-crashed without a python error}"
 }
 
+ra_setup() {
+    RA_BIN=$(command -v retroarch || echo /opt/retroarch/bin/retroarch)
+    [ -x "$RA_BIN" ] || { RA_BIN=""; return; }
+    mkdir -p /tmp/rahome
+    printf '%s\n' 'video_driver = "null"' 'audio_driver = "null"' 'input_driver = "null"' \
+      'input_joypad_driver = "null"' 'menu_enable = "false"' 'save_config_on_exit = "disabled"' \
+      > /tmp/rahome/null.cfg
+}
+
+# RetroArch opens cores with RTLD_LAZY inside a process that already provides
+# libstdc++, libiconv and friends, so it is the only honest loader test: a bare
+# ctypes dlopen reported DoubleCherryGB as broken while RetroArch loads it fine,
+# and it also cannot see fake08's old build crash (SIGILL) as clearly.
+ra_probe() {
+    local log
+    [ -n "$RA_BIN" ] || return 0
+    log=$(HOME=/tmp/rahome timeout 40 "$RA_BIN" -v -L "$1" --config /tmp/rahome/null.cfg 2>&1)
+    if echo "$log" | grep -q "Failed to open libretro core"; then return 1; fi
+    return 0
+}
+
 cmd=${1:-plan}
 shift 2>/dev/null || true
 cores="$*"
@@ -140,7 +163,8 @@ check)
     ;;
 install)
     for b in $BRANCHES; do fetch_index $b; done
-    installed=0; skipped=0
+    ra_setup
+    installed=0; skipped=0; reverted=0
     for c in $cores; do
         n=$(newest $c); [ -z "$n" ] && { printf "%-26s not published\n" "$c"; skipped=$((skipped+1)); continue; }
         set -- $n; branch=$1; date=$2
@@ -157,10 +181,22 @@ install)
             && [ -s "$COREDIR/${c}_libretro.info.new" ] && mv "$COREDIR/${c}_libretro.info.new" "$COREDIR/${c}_libretro.info" \
             || rm -f "$COREDIR/${c}_libretro.info.new"
         got=$(md5sum "$COREDIR/${c}_libretro.so" | cut -d' ' -f1)
-        if [ "$got" = "$new" ]; then printf "%-26s installed %s %s  verified\n" "$c" "$branch" "$date"; installed=$((installed+1));
-        else printf "%-26s MD5 MISMATCH after install (%s)\n" "$c" "${got:0:8}"; fi
+        if [ "$got" != "$new" ]; then printf "%-26s MD5 MISMATCH after install (%s)\n" "$c" "${got:0:8}"; continue; fi
+        if ! ra_probe "$COREDIR/${c}_libretro.so"; then
+            # the build is newer but this rootfs cannot open it (np2kai rev. later than 22 needs
+            # ymzadpcm_getpcm that the older build had statically linked) -- do not leave it installed
+            if [ -f "$BACKUP/${c}_libretro.so" ]; then
+                cp -a "$BACKUP/${c}_libretro.so" "$COREDIR/${c}_libretro.so"
+                printf "%-26s %s %s but RetroArch cannot open it -- reverted\n" "$c" "$branch" "$date"
+            else
+                printf "%-26s RetroArch cannot open it and there was no backup -- LEFT INSTALLED\n" "$c"
+            fi
+            reverted=$((reverted+1)); continue
+        fi
+        printf "%-26s installed %s %s  verified + RetroArch opens it\n" "$c" "$branch" "$date"
+        installed=$((installed+1))
     done
-    echo "--- $installed replaced, $skipped unchanged; previous versions in $BACKUP"
+    echo "--- $installed replaced and load-tested, $reverted reverted, $skipped unchanged; backups in $BACKUP"
     echo "--- restart RetroArch or ES to load them; undo one with: ngp-core-update.sh rollback <core>"
     ;;
 verify)
@@ -188,6 +224,27 @@ compare)
         else same=$((same+1)); fi
     done
     echo "--- $changed behave differently, $same unchanged"
+    ;;
+raload)
+    # The check that actually matters: let RetroArch itself dlopen each core in a
+    # throwaway HOME with null video/audio/input, so the card's real config and
+    # the panel's DRM master are untouched. A core that initializes prints its own
+    # banner; "requires content, but nothing was provided" is the success line.
+    ra_setup
+    [ -n "$RA_BIN" ] || { echo "no retroarch binary found"; exit 1; }
+    ok=0; bad=0
+    for c in $cores; do
+        f="$COREDIR/${c}_libretro.so"
+        [ -f "$f" ] || { printf "  SKIP  %-24s not installed\n" "$c"; continue; }
+        log=$(HOME=/tmp/rahome timeout 40 "$RA_BIN" -v -L "$f" --config /tmp/rahome/null.cfg 2>&1)
+        banner=$(echo "$log" | grep -a '\[libretro' | head -1 | sed 's/.*\[libretro[^]]*\] //')
+        if echo "$log" | grep -qiE 'Failed to (dlopen|load libretro core)|has no global symbol|Segmentation fault'; then
+            bad=$((bad+1)); printf "  FAIL  %-24s %s\n" "$c" "$(echo "$log" | grep -aiE 'fail|segmentation' | head -1)"
+        else
+            ok=$((ok+1)); printf "  ok    %-24s %s\n" "$c" "${banner:-(loaded, no banner)}"
+        fi
+    done
+    echo "--- RetroArch loaded $ok cores, $bad failed"
     ;;
 rollback)
     for c in $cores; do
