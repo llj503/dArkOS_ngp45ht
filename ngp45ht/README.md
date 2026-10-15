@@ -48,9 +48,10 @@ bash ngp45ht/kernel-patches/apply.sh kernel_rk3562        # 打补丁
 wsl -u root bash -lc "bash /mnt/<x>/ngp45ht/tools/slimbuild.sh"
 ```
 
-同一批改动也整理成了 4 个正式提交（分支 `ngp45ht`，基于 bmdhacks 内核的 `557e5c28a`）：驱动、板级 DTS+Makefile、
-`ngp45ht_defconfig`、共享 dtsi 的标签。`kernel-patches/` 是它的可移植形式，由 `git diff 557e5c28a..HEAD`
-重新生成，所以分支内容和补丁系列两者不会走偏。
+同一批改动也整理成了 4 个正式提交，放在 **[llj503/kernel_rk3562 的 `ngp45ht` 分支](https://github.com/llj503/kernel_rk3562/tree/ngp45ht)**
+（`56dced3ff`，父提交就是 bmdhacks 的 `557e5c28a`）；仓库的子模块已经改指向这个分支，
+`git submodule update --init kernel_rk3562` 拿到的就是打好补丁的内核。`kernel-patches/` 是同一内容的可移植形式，
+由 `git diff 557e5c28a..HEAD` 重新生成，所以分支和补丁系列两者不会走偏。
 
 `slimbuild.sh` 会把 5 个改动文件重新拷进构建树、跑 `make ngp45ht_defconfig`、编
 `Image modules dtbs`，再单独用内核树驱动外部模块编译（驱动自己的 Makefile 硬编码了厂商 `KDIR`），
