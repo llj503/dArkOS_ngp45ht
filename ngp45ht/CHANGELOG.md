@@ -6,16 +6,18 @@
 `Image` `4216e2244c3b74cd…`(32,522,752 B，`ngp45ht_defconfig`)、`rk3562-ngp45ht.dtb` `f716f3077b4e1aa1…`、
 `firstboot.sh` `8c1a37e6281a0a37…`（loop 挂载 offset 16777216 复核）。
 
-- **47 个 libretro 内核刷新**：来源 `christianhaitian/retroarch-cores` 分支 **rg503**（dArkOS 对所有非 rk3326
+- **48 个 libretro 内核刷新**：来源 `christianhaitian/retroarch-cores` 分支 **rg503**（dArkOS 对所有非 rk3326
   板子都用 rg503），也就是 `build_retroarch.sh:98` 当年 wget 的同一个仓；每个内核的构建日期取自分支自带的
-  `aarch64/.index-extended`。镜像之后被重建过 52 个，其中 49 个字节真的不同，全部替换并逐个 md5 校验；
-  `arduous`/`chimerasnes`/`minivmac` 只是重建、字节相同。净增 13.2 MB（先删旧再写新，所以放得下）。
-- **两个回滚**：`DoubleCherryGB` 和 `np2kai` 换新版后反而引用了本 rootfs 没有的符号
-  （`utf8skip` / `ymzadpcm_getpcm`），保持镜像原版本。
-- **一个原本就坏的内核被顺带修好**：旧版 `fake08` dlopen 直接 SIGILL，根本加载不了；新版正常。
-- 新增 `/usr/local/sbin/ngp-core-update.sh`（`b5b7f707b036…`）：plan / check / install / verify / compare /
-  rollback，`--32` 切 32 位目录；刷出来的卡和现役卡用同一个入口继续更新。
-- 新增 `/usr/local/share/ngp-cores/manifest-20261015.txt`：这次换掉的 47 个内核的名字与 md5。
+  `aarch64/.index-extended`。镜像之后被重建过 52 个，其中 49 个字节真的不同。
+- **验收以 RetroArch 自己加载为准**：`ngp-core-update.sh raload` 用 null 视频/音频/输入驱动在临时 `HOME` 里逐个
+  让 RA 打开内核，48 颗全部加载成功（fbneo 自报 `v1.0.0.03 260904 GITa251c7622`）。裸 `ctypes` dlopen 会
+  误报九颗正常内核缺符号，`install` 因此改成"装完就 RA 验收，打不开自动恢复刚做的备份"。
+- **一颗保持原样**：`np2kai` 新版能装、md5 也对，但 RetroArch 报 `Failed to open libretro core`
+  （需要 `ymzadpcm_getpcm`），所以镜像里仍是可用的旧版。
+- **一颗原本就是坏的**：旧版 `fake08` 在 RA 里直接 SIGILL、根本加载不了；新版正常，等于顺带修好。
+- 新增 `/usr/local/sbin/ngp-core-update.sh`（`3ec2277a5e5e…`）：plan / check / install / raload / verify /
+  compare / rollback，`--32` 切 32 位目录；刷出来的卡和现役卡用同一个入口继续更新。
+- 新增 `/usr/local/share/ngp-cores/manifest-20261015.txt`：这次换掉的 48 个内核的名字与 md5。
 - 内核源码有了真正的仓库：4 处改动是 **`llj503/kernel_rk3562` 分支 `ngp45ht`**（`56dced3ff`，父提交
   `557e5c28a`）上的 4 个正式提交，`_repo` 的子模块已指向它（`git submodule update --init kernel_rk3562` 直接拿到
   打好补丁的内核）；`kernel-patches/*.patch` 由 `git diff 557e5c28a..HEAD` 重新生成，两者内容一致（用
@@ -30,12 +32,13 @@ GitHub 的 release 单文件上限是 2 GiB，所以整包按 1.9 GB 切了三�
 
 | 文件 | 大小 | sha256 |
 |---|---|---|
-| `dArkOS_ngp45ht_trixie_20261015-00.img.xz.part` | 1,992,294,400 | `fa17f772f4281a07976ebc48cc7e8ef75c2cb5fa914dc84e5db02c51586bdd92` |
-| `dArkOS_ngp45ht_trixie_20261015-01.img.xz.part` | 1,992,294,400 | `92f9f1a29189101775d087ce35fb523ad5a324d2cf7c8f19a81025c2ca676291` |
-| `dArkOS_ngp45ht_trixie_20261015-02.img.xz.part` | 518,430,984 | `cbc720c4141f36e3b459063641b5645403a57f08bd0da00b37d0db6b9d3d79b2` |
+| `dArkOS_ngp45ht_trixie_20261015-00.img.xz.part` | 1,992,294,400 | `437a2333ad3634663e62ed9bf09ba4de412ca66e2c50cef72a4f5f4e2f7c21ae` |
+| `dArkOS_ngp45ht_trixie_20261015-01.img.xz.part` | 1,992,294,400 | `18b35707d5ff99622c019e1190c3ed72d19cc9534a86fabfdf35f291517df559` |
+| `dArkOS_ngp45ht_trixie_20261015-02.img.xz.part` | 517,603,624 | `5bc25341b94fe85c4dbe7dd4bf035694f8f169144d33fd901c9bf2cdaefa147f` |
 
-合并后整包 `dArkOS_ngp45ht_trixie_20261015.img.xz` = 4,503,019,784 B，
-sha256 `76e0bcbe307811627db3637e253d10e9ee3b7f14b09259d6bfc8bb8d01af8053`，解压后 12 GiB（12,884,901,888 B）。
+合并后整包 `dArkOS_ngp45ht_trixie_20261015.img.xz` = 4,502,192,424 B，
+sha256 `a0f7c41af3f3cfe988a35cf3634e12aebbe48b2c0687b68da841409eb9b4e67f`，解压后 12 GiB（12,884,901,888 B）。
+三卷拼接后 `xz -t` 通过，所以切分无损。
 
 ```bash
 cat dArkOS_ngp45ht_trixie_20261015-*.img.xz.part > dArkOS_ngp45ht_trixie_20261015.img.xz

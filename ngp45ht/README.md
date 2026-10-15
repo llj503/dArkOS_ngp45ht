@@ -178,7 +178,7 @@ TCP 端口关闭就是它的特征。已装机的卡上额外手动 `systemctl e
   dw-mmc、pcie、combphy、otp 和 GPU 都已进主线，但 **DSI、VOP、IOMMU、USB2-PHY/EHCI/OHCI/DWC3、
   I2S/SAI/SPDIF、thermal、DMC、RGA、VPU 都还没有**，也就是没屏幕、没 USB（⇒没 WiFi）、没声音。
   真要上主线得先把这几套驱动补完，成本远高于继续用 5.10 BSP。
-- 发布镜像 `dArkOS_ngp45ht_trixie_20261015.img.xz`（4,503,019,784 B，sha256 `76e0bcbe…`，见
+- 发布镜像 `dArkOS_ngp45ht_trixie_20261015.img.xz`（4,502,192,424 B，sha256 `a0f7c41a…`，三卷哈希与拼接说明见
   [`CHANGELOG.md`](CHANGELOG.md)）不在 git 里，GitHub 单文件 2 GiB 上限所以切成三卷。它不是从 build tree 完整
   构建出来的，而是 RG43H 底包 + `fatpatch.py` 换 Image/DTB/firstboot + rootfs 侧装模块和内核组装的，
   所以照着上面的步骤能得到同款内核与 DTB，但整张卡的组装流程还没有脚本化。
