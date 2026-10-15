@@ -26,7 +26,8 @@ XIFAN NGP45HT 是一款 **Rockchip RK3562** 掌机：2 GB RAM、3.7 GB eMMC、10
 | `tools/deploy_kernel.py` | 通过 SSH 把 Image + DTB 写到已装机的卡上（带空间检查和哈希校验） |
 | `tools/ngpremote.py` `tools/remote_dev.py` | PC 端看屏幕 + 注入按键（1024×768 横屏，PC 只需 Pillow） |
 | `tools/*.py` 其余 | 硬件探针：GRF/GPIO/CRU 寄存器、PMIC I²C、按键与 ADC 录制、引脚占用归属 |
-| `firstboot.sh` | 装到镜像 FAT 分区，首次开机跑一次；在已装机的卡上等价于 `/usr/local/sbin/ngp45ht-fixes.sh` |
+| `firstboot.sh` | 只做本板修正的那部分（幂等）；装机卡上是 `/usr/local/sbin/ngp45ht-fixes.sh` |
+| `boot-firstboot.sh` | 出厂 `/boot/firstboot.sh` 的逐字节副本 = 上面的修正 **+ dArkOS 自己的 `expandtoexfat.sh` 首启步骤**，别手工跑 |
 
 `tools/` 里保留了调试期的探针脚本，它们记录了每个结论是怎么量出来的；`assemble.sh`、
 `kbuild.sh`、`kbuild2.sh` 是过程历史，日常只需要 `slimbuild.sh` / `dtbrebuild.sh` / `fatpatch.py`。
@@ -133,6 +134,8 @@ GITa251c7622`），而 `requires content, but nothing was provided` 这句就是
 - **PPSSPP 无声是因为 `ppsspp.sh`。** 它按 `.DEVICE`（本镜像里仍是 `RG43H`）强制 `amixer sset 'Playback Path' HP`，
   而 NGP45HT 的喇叭挂在 RK817 自己的 SPK 输出上（功放由 `spk-ctl`/GPIO0_A7 使能）。`firstboot.sh` 把它改回
   `SPK`，同时把 RetroArch 两个 cfg 的 L2/R2 一起改掉；不动 `RG43H` 身份文件，因为很多上游脚本靠它分支。
+  注意 dArkOS 自带的 **`/opt/system/Advanced/Fix Audio.sh` 会把 `Playback Path` 设回 `HP`**（第 18 行），在界面上
+  跑它本板喇叭就又哑了；恢复办法是 `sudo /usr/local/sbin/ngp45ht-fixes.sh`（幂等）。
 - **TF 供电不是 GPIO。** `vccio_sd` 是 RK817 LDO_REG5，两个卡槽共用，只在 TF2 协商时可能被抬压，而 TF1
   上就是 rootfs；共享 dtsi 的 `vcc_sd` GPIO regulator 落在 `GPIO0_A5`，那在本板是一颗游戏按键。
 - **USB 是 host 控制器，不是 DWC3。** 板载 WiFi 和 Type-C 都挂在 EHCI/OHCI (`usb@fed00000`/`usb@fed40000`) 上，
@@ -141,16 +144,27 @@ GITa251c7622`），而 `requires content, but nothing was provided` 这句就是
 - **`/boot` 只有 98 MB FAT。** 别在 `/boot` 里堆 `Image.bak-*`；`deploy_kernel.py` 现在把备份写到
   btrfs 上的 `/opt/ngp-boot-backups/`，并在上传前检查剩余空间、用 `cp`+`mv` 原子替换。
 
-## firstboot.sh
+## firstboot.sh 与 ngp45ht-fixes.sh（两份不一样，别混）
 
 镜像 rootfs 里 `multi-user.target.wants/firstboot.service` 是 enable 的，所以每次刷卡会跑一次 FAT 上的
-`/boot/firstboot.sh`——这就是为什么修正可以只写进 FAT，不必 rw 挂载 btrfs。脚本幂等，重复执行会打印
-"already converged"；已装机的卡上该 unit 是 disabled 的，等价入口是 `/usr/local/sbin/ngp45ht-fixes.sh`。
+`/boot/firstboot.sh`——这就是为什么修正可以只写进 FAT，不必 rw 挂载 btrfs。
+
+- **`boot-firstboot.sh`** 才是出厂放在 `/boot/firstboot.sh` 的那份（逐字节相同）：本板修正 **+ dArkOS 自己的首启步骤**
+  （调用 `/boot/expandtoexfat.sh` 扩容 `/roms`）。**不要手工运行它**——那会再触发一次 exFAT 扩容。
+- **`firstboot.sh`** 是只做修正的那部分，也就是装机卡上 `/usr/local/sbin/ngp45ht-fixes.sh` 的内容；幂等，
+  重复执行打印 "already converged"。要重跑修正（例如你跑了 `/opt/system/Advanced/Fix Audio.sh` 把音频又设回 HP）
+  就用它，别用上面那份。
 它做三件事：PPSSPP/RetroArch 音频与 L2/R2 修正、把上面的逻辑再落一遍、以及**密钥卫生**
 （marker `/etc/ngp45ht-hygiene.done` 保护）：删掉底包里上游作者的 `/etc/ssh/ssh_host_*_key*` 后跑
 `ssh-keygen -A`，并把 `/etc/hostapd/hostapd.conf` 里的默认 `ssid`/`wpa_passphrase` 换掉。
 底包不含任何你的家用 WiFi 凭据：`/etc/NetworkManager/system-connections`、`/var/lib/NetworkManager`
 是空的，没有 `wpa_supplicant` 配置，也没有 `.ssh`。
+
+**怎么确认卫生真的跑过**：`ls /etc/ngp45ht-hygiene.done`，再 `grep -E '^ssid=|^wpa_passphrase=' /etc/hostapd/hostapd.conf`。
+如果还是底包带的那对默认值，说明这张卡仍在用上游作者公开的热点口令、以及和所有同源副本共用的 SSH 主机密钥。
+2026-10-15 就发现装机卡本身**没跑过**（它的 `/boot/firstboot.sh` 还是加卫生逻辑之前的 3153 字节旧版），
+补跑后主机密钥已重生成——因此用普通 SSH 客户端连设备会看到 host key 变更告警，`ssh-keygen -R <设备IP>` 清掉即可。
+凡是"先做成镜像、之后又改 firstboot 逻辑"的情况，都要记得已装机那份不会自动更新。
 
 ## 调试
 
@@ -172,6 +186,14 @@ TCP 端口关闭就是它的特征。已装机的卡上额外手动 `systemctl e
 
 未做 / 保留意见：
 
+- **板载蓝牙不可用，原厂也一样。** AIC8800DC 的蓝牙是同一颗 USB 功能（`hci0` 由 `btusb` 从 `1-1:1.0/1.1` 建，
+  WiFi 在 `1-1:1.2`），但没有任何厂商初始化：dArkOS 和**原厂 EmuELEC 6.1.118 量到的特征完全相同**
+  （`Features: 00 00 00 00 60 00 00 00`、`SCO MTU 0:0`、读本地名 `Input/output error`、`btmgmt` 无 `bredr`），
+  原厂的 `aic8800DC` 固件目录也是 21 个纯 WiFi 文件、`find -iname "*bt*"` 为空，而且出厂连 `bluetooth.service`
+  都是 disabled。表现就是"能扫描到设备但连不上"。原厂 DTB 里那个 `wireless-bluetooth`/`uart1-gpios` 节点是 EVB
+  参考设计遗留 —— `uart1m0_xfer`（GPIO1_D1/D2）在本机是 L1/L2 按键，板上并没有把蓝牙接到 UART。
+  要真用蓝牙请上 **btusb 认识的 USB 蓝牙 dongle** 并安装 bluealsa（dArkOS 自己的构建注释就写着
+  `USB dongle required`）。
 - EmulationStation 的面键映射里 `a`→305、`b`→304，即机身上 **B 键是确认**。这是 owner 明确决定保留的
   （"不用改了"），不要当成 bug 再去"修"。
 - mainline 7.2.x 目前带不动这块板：RK3562 的 CRU、pinctrl、gpio、i2c、spi、uart、pwm、saradc、
