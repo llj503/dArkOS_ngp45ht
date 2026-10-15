@@ -28,6 +28,10 @@
 
 ### 下载与校验
 
+发布地址：<https://github.com/llj503/dArkOS_ngp45ht/releases/tag/ngp45ht-20261015>
+（三卷 + `sha256sums.txt` + 整包 `.sha256` 都在附件里；GitHub 对每个附件回出的 sha256 digest
+与本地文件逐一核对一致，三卷大小相加 = 4,502,192,424 B = 整包大小。）
+
 GitHub 的 release 单文件上限是 2 GiB，所以整包按 1.9 GB 切了三卷：
 
 | 文件 | 大小 | sha256 |
