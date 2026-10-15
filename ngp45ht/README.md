@@ -21,6 +21,8 @@ XIFAN NGP45HT 是一款 **Rockchip RK3562** 掌机：2 GB RAM、3.7 GB eMMC、10
 | `tools/dtbrebuild.sh` | 单编 DTB 并打印解析后的 joystick 节点，改 key/轴时最快 |
 | `tools/fatpatch.py` | 直接在 `.img` 的 FAT boot 分区里 list/patch/extract 文件（不重刷卡） |
 | `tools/install_wifi.sh` | 把 AIC8800DC 的 `.ko` + `/usr/lib/firmware/aic8800DC` + softdep/modprobe 装进 rootfs 镜像 |
+| `tools/ngp-core-update.sh` | **设备侧** libretro 内核更新器：plan / check / install / verify / compare / rollback（`--32` 换 32 位目录） |
+| `tools/devsh.py` | 把本地 `.sh` 推到卡上以 ark 身份执行（顺手去 CRLF），例如 `python devsh.py ngp-core-update.sh plan` |
 | `tools/deploy_kernel.py` | 通过 SSH 把 Image + DTB 写到已装机的卡上（带空间检查和哈希校验） |
 | `tools/ngpremote.py` `tools/remote_dev.py` | PC 端看屏幕 + 注入按键（1024×768 横屏，PC 只需 Pillow） |
 | `tools/*.py` 其余 | 硬件探针：GRF/GPIO/CRU 寄存器、PMIC I²C、按键与 ADC 录制、引脚占用归属 |
@@ -46,6 +48,10 @@ bash ngp45ht/kernel-patches/apply.sh kernel_rk3562        # 打补丁
 wsl -u root bash -lc "bash /mnt/<x>/ngp45ht/tools/slimbuild.sh"
 ```
 
+同一批改动也整理成了 4 个正式提交（分支 `ngp45ht`，基于 bmdhacks 内核的 `557e5c28a`）：驱动、板级 DTS+Makefile、
+`ngp45ht_defconfig`、共享 dtsi 的标签。`kernel-patches/` 是它的可移植形式，由 `git diff 557e5c28a..HEAD`
+重新生成，所以分支内容和补丁系列两者不会走偏。
+
 `slimbuild.sh` 会把 5 个改动文件重新拷进构建树、跑 `make ngp45ht_defconfig`、编
 `Image modules dtbs`，再单独用内核树驱动外部模块编译（驱动自己的 Makefile 硬编码了厂商 `KDIR`），
 最后把 `Image-ngp45ht`、`rk3562-ngp45ht.dtb` 和两个 `.ko` 连同 sha256 一起 stage 出来。
@@ -61,6 +67,40 @@ wsl -u root bash -lc "bash /mnt/<x>/ngp45ht/tools/slimbuild.sh"
 所以拿 `rg43h_defconfig` 编出来的 `aic8800_fdrv_usb.ko` 也能塞进 slim Image 里，加载不报错，
 只是 WiFi 永远 association 失败——这就是当初"精简 config 杀网络"的真凶。两个 `.ko` 与 Image 同源，
 才有网络。装完记得在 rootfs 里重跑 `depmod`。
+
+## libretro 内核（cores）更新
+
+dArkOS 不编内核：`build_retroarch.sh:98` 在构建镜像时从 `christianhaitian/retroarch-cores` 的 **rg503** 分支
+wget 每个 `<core>_libretro.so.zip`（只有 rk3326 用 master），所以卡上的内核就是镜像那天那个分支的样子。
+每个内核的构建日期写在分支自带的 `aarch64/.index-extended` 里，不下载就能判断谁落后。
+
+RetroArch 本体没什么可升：卡上是 `1.22.2 (Jun 3 2026)`，而 v1.22.2 就是上游最新 release、也是
+`rk3562_core_builds/scripts/retroarch.sh` 里 `tag=` pin 的版本；PPSSPP 的 v1.20.4 同理也是最新 release。
+再往上只有 nightly，代价是所有内核 ABI 连坐。
+
+2026-10-15 实测：卡上 130 个内核（129 个来自 `retroarch_cores.txt`，`mametiger` 两个分支都不发布，只能留在
+镜像里的版本），镜像之后被重建过 52 个，其中 49 个字节确实不同，已全部装上并逐个 md5 校验；
+`arduous`/`chimerasnes`/`minivmac` 只是重建、字节相同。**卡上的 MAME 内核已经是 0.281。**
+
+必须跑在**设备侧**：这台 PC 拉 `raw.githubusercontent.com` 只有约 11 KB/s，而同一张卡自己是约 6 MB/s
+（19 MB 三秒下完）；`build_retroarch.sh` 用的 `github.com/.../raw` 形式在 PC 上会重定向到
+`media.githubusercontent.com` 直接卡死。
+
+```bash
+python devsh.py ngp-core-update.sh plan                # 只看 .index-extended，谁落后
+python devsh.py ngp-core-update.sh check <core> ...     # 下载并比对字节
+python devsh.py ngp-core-update.sh install <core> ...   # 备份后替换 + md5 校验
+python devsh.py ngp-core-update.sh compare              # 与备份做差分 dlopen
+```
+
+验收只能看**差分**。`verify` 是在 RetroArch 之外 dlopen 每个内核，而很多内核的依赖是 RetroArch 自己带进进程的
+（`mame`/`ppsspp`/`stella`/`easyrpg`/`vircon32`/`dosbox_pure`/`hatarib`/`emuscv`/`mess` 都会报 undefined symbol
+却在界面里跑得好好的），所以绝对成败没有意义，`compare`（新版 vs 备份）才有意义。它抓到 `DoubleCherryGB`
+（缺 `utf8skip`）和 `np2kai`（缺 `ymzadpcm_getpcm`）换新版后反而引用了卡上没有的符号 —— 两个都回滚了；也抓到
+**旧版 `fake08` 本身就是 SIGILL（rc=132）、新版能加载** —— 等于这次升级顺手修好了一个从来不能用的内核。
+每个内核单独起进程就是为了 rc=132 只杀自己、不掩盖元凶。
+
+备份目录默认 `/roms/core-backups/<日期>-64`：根分区只剩 5.8 GB，而 `mame_libretro.so` 单文件就 200 MB。
 
 ## 板级要点（都是量出来的，不是猜的）
 
