@@ -1,5 +1,39 @@
 # 更新记录
 
+## 2026-10-16 · 卡上修正（没有重打镜像）
+
+都落在**现役卡**上，脚本同时进了 `tools/`；下次重建镜像一起带进去。
+
+- **两张 TF 卡合并成一个 `/roms`**：`ngp-rompool.sh install` 写 fstab（分支 `/mnt/roms1` + `/mnt/roms2`，
+  mergerfs 池挂在 `/roms`，dArkOS 和 ES 的路径一个都不用改），冷启动已验证。TF2 不在也能正常起：
+  单分支池本身就成立，另有 `ConditionPathIsMountPoint=!/roms` 的兜底 unit 把 TF1 直接挂到 `/roms`。
+  坑：fstab 的 `x-systemd.requires=` 必须写**单元名**（`mnt-roms1.mount`），写路径再配 `nofail` 会被静默跳过，
+  而 `systemctl status roms.mount` 还会因为兜底 unit 显示 `active (mounted)`，很难看出池没起来。
+- **GPU 调速从来没生效过**：`perfmax`/`perfnorm` 把 Mali 的 devfreq 节点写死成 `fde60000.gpu`（RK3566 的地址），
+  本机是 `ff320000.gpu`，脚本又没有 `set -e`，所以是静默无效而非报错。现在探测不到就退回
+  `/sys/class/devfreq/*.gpu`，实测 300 → 900 MHz。
+- **内核来源换成官方 buildbot**：`ngp-core-update.sh` 默认 `SOURCE=buildbot`
+  （`nightly/linux/{aarch64,armhf}/latest`，231/109 条），两套 RA 的 `core_updater_buildbot_cores_url`
+  也都指向它，HBMAME 这类只有 buildbot 才有的内核因此下得到。注意 RA 退出时会整份重写 cfg，
+  改这两个键时 RA 必须没在跑（见 README「遮罩与滤镜」）。
+- **per-core 遮罩的路径写错了**：RA 只认 `config/<library_name>/<library_name>.cfg`，之前的扁平
+  `config/<library_name>.cfg` 它连 stat 都不做，症状就是"GBA 打开没遮罩，得手动切一次"。改对之后用
+  `ngp-shaders.sh verify`（对 cfg **副本**无头跑 RA，看 `[Override]` 日志）验证：GBA/GB 自动上
+  `handheld/lcd-grid-v2.glslp`，街机（FinalBurn Neo / MAME 系列 / HBMAME / FB Alpha）显式关闭，
+  底包的全局 `Dot_Matrix_4x.filt` 已清空，帧率 OSD 两套 RA 都关。
+- **768P PNG 遮罩按游戏分类自动加载**：`ngp-shaders.sh install_masks <包>` + `masks on`，18 张 1024×768
+  全屏遮罩装到 `/opt/ngp-shaders/masks768`（校验每个 cfg 指向的 PNG 存在且 IHDR 确实是 1024×768），
+  然后用 RA 的 **per-content-directory override**（`config/<核心>/<ROM 父目录>.cfg`，叠在 per-core 之上）
+  给 `gba gb gbc nes famicom fds snes sfc megadrive genesis wonderswan wonderswancolor ngp ngpc pico-8`
+  各配一张，并配 `video_scale_integer = "true"` —— 遮罩窗口就是各机种分辨率的整数倍
+  （GBA 240×160×4=960×640、GB/GBC 160×144×5=800×720、NES/SNES 256×224×3=768×672、MD 320×224×3=960×672、
+  WSC 224×144×4=896×576、Pico-8 128×128×6=768×768），整数缩放正好落进洞里；只有 NGPC（782×741）差约 2%。
+  第三方美术，不进仓库。
+- **ES 里补上 FBNeo 分类**：`es_systems.cfg` 原本没有任何系统指向 `/roms/fbneo`（2020 个游戏），
+  而 ES 只列"有内容的系统"，所以前端只剩 CPS1 / GBA / ports。已在 `arcade` 之前插入 `fbneo` 系统块
+  （`<theme>arcade</theme>` 复用现役主题美术；核心只列卡上真装了的 `fbneo hbmame fbalpha2012 mame2003_plus mame`），
+  落盘前用 `ET.fromstring()` 验过语法，重启 `emulationstation.service` 生效，原文件备份为 `es_systems.cfg.orig-ngp`。
+
 ## 2026-10-15 · `dArkOS_ngp45ht_trixie_20261015.img.xz`
 
 改动**只在 p4 rootfs**。p3 FAT 与 20261013 版逐字节相同：
@@ -46,7 +80,7 @@ sha256 `a0f7c41af3f3cfe988a35cf3634e12aebbe48b2c0687b68da841409eb9b4e67f`，解�
 
 ```bash
 cat dArkOS_ngp45ht_trixie_20261015-*.img.xz.part > dArkOS_ngp45ht_trixie_20261015.img.xz
-echo "76e0bcbe307811627db3637e253d10e9ee3b7f14b09259d6bfc8bb8d01af8053  dArkOS_ngp45ht_trixie_20261015.img.xz" | sha256sum -c -
+echo "a0f7c41af3f3cfe988a35cf3634e12aebbe48b2c0687b68da841409eb9b4e67f  dArkOS_ngp45ht_trixie_20261015.img.xz" | sha256sum -c -
 xz -dc dArkOS_ngp45ht_trixie_20261015.img.xz | sudo dd of=/dev/<TF卡> bs=4M status=progress
 ```
 Windows 下用 7-Zip 解出 `.img` 再交给 Rufus（"DD 模式"写入）。首次开机 `/boot/firstboot.sh` 会跑一次：

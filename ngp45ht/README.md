@@ -22,6 +22,10 @@ XIFAN NGP45HT 是一款 **Rockchip RK3562** 掌机：2 GB RAM、3.7 GB eMMC、10
 | `tools/fatpatch.py` | 直接在 `.img` 的 FAT boot 分区里 list/patch/extract 文件（不重刷卡） |
 | `tools/install_wifi.sh` | 把 AIC8800DC 的 `.ko` + `/usr/lib/firmware/aic8800DC` + softdep/modprobe 装进 rootfs 镜像 |
 | `tools/ngp-core-update.sh` | **设备侧** libretro 内核更新器：plan / check / install / verify / compare / rollback（`--32` 换 32 位目录） |
+| `tools/ngp-shaders.sh` | **设备侧**遮罩/滤镜：install / install_masks / masks on·off·status·list / percore / apply / overlay / measure / verify / repair / status（详见上面「遮罩与滤镜」） |
+| `tools/ngp-bt-agent.py` `tools/ngp-bt-agent.service` `tools/install_bt_agent.sh` | BlueZ 配对应答 agent（auto-accept，`RequestPinCode` 回 `0000`）与它的 systemd 安装器 |
+| `tools/ngp-bt-pair.sh` `tools/btpair.sh` `tools/btdump.sh` | 配对 CLI、扫描+自动挑目标配对、广播/GATT 取证 dump |
+| `tools/btaic.sh` `tools/btaic2.sh` `tools/btnotify.sh` | 厂商 `aic_btusb` 实验（含强制灌补丁）与 GATT notify/轮询抓取，全部可逆 |
 | `tools/devsh.py` | 把本地 `.sh` 推到卡上以 ark 身份执行（顺手去 CRLF），例如 `python devsh.py ngp-core-update.sh plan` |
 | `tools/deploy_kernel.py` | 通过 SSH 把 Image + DTB 写到已装机的卡上（带空间检查和哈希校验） |
 | `tools/ngpremote.py` `tools/remote_dev.py` | PC 端看屏幕 + 注入按键（1024×768 横屏，PC 只需 Pillow） |
@@ -112,7 +116,272 @@ GITa251c7622`），而 `requires content, but nothing was provided` 这句就是
 
 备份目录默认 `/roms/core-backups/<日期>-64`：根分区只剩 5.8 GB，而 `mame_libretro.so` 单文件就 200 MB。
 
+## 遮罩与滤镜
+
+借鉴 ROCKNIX 的遮罩/滤镜体系，但**只搬对我们这台有效的部分**。ROCKNIX 的做法是两支包 + overlayfs：
+`tmp-shaders.mount` 把 `common-shaders`(Cg) + `glsl-shaders` + `slang-shaders` 叠成 `/tmp/shaders`
+（upper 是 `/storage/shaders`），`tmp-overlays.mount` 把 `retroarch-overlays` 叠成 `/tmp/overlays`。
+
+钉死的版本（都按 sha256 校验过，卡上直连 codeload 实测 7.6 MB/s）：
+
+| 包 | commit | sha256 | 装进来的是什么 |
+|---|---|---|---|
+| `libretro/slang-shaders` | `a2ac00bc` | `5ae2a62c…` | **1822 个 `.slangp` + 1355 个预编译 `.slang`** → `/opt/ngp-shaders/shaders/shaders_slang` |
+| `libretro/common-overlays` | `ea3f2bf1` | `4025f261…` | 83 个遮罩 `cfg` + 153 个 PNG（只取 `borders ctr effects misc`）→ `/opt/ngp-shaders/overlays` |
+
+**素材必须放 `/opt`，不能放 `/roms`。** dArkOS 的 `Switch to SD2 for Roms.sh` / `Switch to Main SD for Roms.sh`
+会对 `retroarch.cfg`、`retroarch32/retroarch.cfg` 等文件做全局字符串替换
+（`sed -i '/roms2/s//roms/g'` 及其反向），所以我写在 `retroarch.cfg` 里的 `video_shader = "/roms/shaders/…"`
+被改成 `/roms2/shaders/…`，而 TF2 上没有这个目录，叠加 `video_shader_enable = "true"`，**RA 加载内容时直接退出**
+（表现就是"切换到 TF2 后游戏闪退"）。`/opt` 在系统卡的 btrfs 上、永不参与该替换。实测验证：把两个方向的
+sed 都跑在配置副本上之后，`retroarch.cfg` **逐字节不变**。
+
+**这台机器上有效的滤镜后端是 `glslp`，不是 slang** —— 原因见下面「64 位 RetroArch 打不开」一节：
+底包把 64 位 RA 配成 `video_driver = "vulkan"`，而本机的 Vulkan 无法创建显示表面，已改回 `gl`。
+`.slangp` 需要 Vulkan，所以那一整套暂时用不上（文件保留，等 vulkan 修好可用）；
+`common-shaders`/`retropie-shaders` 那两层是 **Cg**，RA 1.22 已不支持，根本不搬。
+底包自带的 630 个 `.glslp` 是现在能用的那套，`/opt/ngp-shaders/shaders/shaders_glsl` 是指向
+`~/.config/retroarch/shaders/shaders_glsl` 的符号链接（`/opt` 在 btrfs 上，可以有软链）。
+
+**遮罩和分辨率的坑（决定了两类东西不能混用）**：`common-overlays` 里多数遮罩写的是
+`overlay0_full_screen = true`（如 `effects/patterns/grid.cfg`、`ctr/effects/scanlines-alpha.cfg`），
+PNG 是**按屏幕铺**的；本机 1024×768 而绝大多数主机的画面不满屏，固定 PNG 遮罩必然和游戏像素错位。
+只有 `effects/scanlines/aperture-grille-3x.cfg` 是 `full_screen = false`。
+所以**像素对齐的遮罩交给 shader**（`handheld/lcd-grid-v2`、`crt/crt-aperture`、Mega Bezel 的 `__LCD-GRID` 系列），
+PNG 包只当边框/装饰用。
+
+工具：`tools/ngp-shaders.sh`
+
+```sh
+./ngp-shaders.sh install                 # 下载 + sha256 校验 + 解包 + 改 cfg
+./ngp-shaders.sh percore lcd gba gb      # 只给 GBA/GB 上 LCD 网格遮罩，其它系统一律不动
+./ngp-shaders.sh percore off arcade      # 显式给街机关掉 shader（比依赖全局关更保险）
+./ngp-shaders.sh verify mgba             # 无头跑一次 RA，用日志证明 override 真被读到
+./ngp-shaders.sh apply lcd               # 全局预设（街机会跟着生效，一般不用）
+./ngp-shaders.sh overlay grid            # PNG 边框/遮罩（注意上面的 full_screen 限制）
+./ngp-shaders.sh measure on|off          # 屏上 fps（fps_show），用来判某档能不能吃满帧
+./ngp-shaders.sh off                     # 全屏蔽            list / status 看现状
+```
+
+`apply`/`percore` 的档位（`zfast-lcd lcd lcd1 dot lcdshader easymode cgwg aperture geom royale pi hyllian
+mbz-potato mbz-std`）路径全部在钉版本 tarball 里逐条核实过存在，不写没验证过的文件名。`percore` 会同时处理
+两套 RA（64 位 `~/.config/retroarch` 与 32 位 `~/.config/retroarch32`），只给该树里**真的装了的核心**写文件，
+按驱动选 `.glslp` 还是 `.slangp`。安装只往 `retroarch.cfg` 里改 4 个键（`video_shader_dir` /
+`video_overlay_dir` / `video_shader` / `video_shader_enable`），第一次运行会备份成 `retroarch.cfg.bak-shaders`。
+
+### per-core 遮罩：RA 只认 `config/<核心名>/<核心名>.cfg`
+
+`configuration.c` 的 `config_load_override()` 拼出来的 per-core 路径只有一种形态：
+
+```
+<config_directory>/<library_name>/<library_name>.cfg
+```
+
+`config_directory` 取自 cfg 里的 **`rgui_config_directory`** 键（键名不是 `config_directory`；
+`file_path_special.c` 的 `APPLICATION_SPECIAL_DIRECTORY_CONFIG` 分支只在它为空时才退化成"主 cfg 所在目录"），
+本机是 `~/.config/retroarch/config`。`library_name` 来自核心的 `retro_get_system_info()`，与 `.info` 里的
+`corename` 一致——`mgba` 和 `mgba_rumble` 都报 `mGBA`，所以一个文件同时覆盖两个核心（ES 的 gba 默认核就是
+`mgba_rumble`）。
+
+**扁平的 `config/mGBA.cfg` 连 stat 都不会被 stat**，而第一版正是这么写的，症状就是"遮罩装了、GBA 打开却没有、
+得手动切一次"。改对之后卡上实测（无头、null 驱动、`--max-frames 3`）：
+
+```
+[INFO] [Override] Core-specific overrides found at "/home/ark/.config/retroarch/config/mGBA/mGBA.cfg".
+[INFO] [Config] Appending override config: ".../config/mGBA/mGBA.cfg".
+```
+
+核心名带空格同样成立（`FinalBurn Neo/FinalBurn Neo.cfg`、`MAME 2003-Plus/…`）。`verify` 子命令就是把这段探针
+固化下来，`percore` 也会顺手删掉旧布局留下的扁平文件（`status` 会把它们标成 `!! stale flat file`）。
+
+### RA 退出时会把整份 cfg 重写一遍
+
+`config_save_on_exit = "true"`（dArkOS 默认）意味着 RA 进程退出时**用内存里的设置覆盖 `retroarch.cfg` 全文**。
+两个后果都在这台机器上实测到过：
+
+- **RA 运行期间从外部改 cfg，改动会被悄悄还原。** `core_updater_buildbot_cores_url` 就是这样从官方 buildbot
+  变回 `christianhaitian/retroarch-cores/rg503/aarch64/` 的。改 RA 配置前先
+  `pgrep -f '/opt/retroarch/bin/retroarch'`，确认它没在跑。
+- **`--appendconfig` 里的值也会被写进真实 cfg。** 用 `-c 真实cfg` + 内含 `video_driver="null"` 的 appendconfig
+  做无头探针，一次就把卡写成 `video_driver/audio_driver/input_driver/menu_driver = "null"`，再进游戏就是黑屏。
+  正确值取自 `retroarch.cfg.bak-shaders`：`gl` / `alsathread` / `udev` / `glui`；`verify` 现在一律对 cfg 的
+  **副本**跑 RA，并在结束后比对 md5，被动过就从快照还原。
+
+### 和 ROCKNIX（AveyondFly）的做法对比：为什么没照搬
+
+`AveyondFly/distribution_rocknix`（分支 `next`）的遮罩**不走 RA 的 per-core override**，而是在启动链里现算：
+
+| 环节 | 文件 | 做什么 |
+|---|---|---|
+| 选 | `packages/ui/emulationstation/config/common/es_features.cfg` + `rocknix/sources/scripts/getshaders` | ES 里每个系统一个 `shaderset` 选项，取值由 `find /tmp/shaders -regex '.*\.\(glslp\|slangp\)$'` 列出 |
+| 算 | `rocknix/sources/scripts/setsettings.sh` 的 `set_shader()` | 读 `game_setting shaderset`，往 `TMP_CONFIG=/tmp/.retroarch.cfg` 追加 `video_shader_enable="true"` / `video_shader="<相对 /tmp/shaders 的路径>"`，同时 `echo -n " --set-shader /tmp/shaders/$SHADER"` |
+| 跑 | `rocknix/sources/scripts/runemu.sh` | 把上面的 stdout 拼进命令行：`retroarch -L /tmp/cores/$CORE_libretro.so --set-shader … --config …/retroarch.cfg --appendconfig /tmp/.retroarch.cfg "$ROM"` |
+
+它能成立的前提是**有一层自己的启动器**（`emu` → `runemu.sh` → `setsettings.sh`）加上只读的 `/tmp/shaders`
+overlayfs 挂载。dArkOS 两样都没有：ES 的命令是写死的
+
+```
+sudo perfmax %GOVERNOR% %ROM%; nice -n -19 /usr/local/bin/%EMULATOR% \
+  -L /home/ark/.config/%EMULATOR%/cores/%CORE%_libretro.so %ROM%; sudo perfnorm
+```
+
+`/usr/local/bin/retroarch` 只是 netplay/dialog 包装（真正 exec 的是
+`/opt/retroarch/bin/retroarch -c /home/ark/.config/<emulator>/retroarch.cfg`）。要塞 `--appendconfig` 就得改
+`es_systems.cfg` 或那个包装脚本，并且每个系统维护一份临时 cfg；RA 原生的 per-core override 不动启动链就能达到
+同样效果，所以这里只搬 ROCKNIX 的**素材包**，机制用自己的。
+
+### 768P PNG 遮罩：按游戏分类自动加载
+
+这类包（用户给的 `66的768p遮罩-通用`，18 组）是 **1024×768 全屏 PNG**，中间挖一个透明窗口，配套 `cfg` 只有四行：
+`overlays = 1` / `overlay0_overlay = X.png` / `overlay0_full_screen = true` / `overlay0_descs = 0`。
+窗口不是随便画的，而是**各自分辨率的整数倍**，所以只要开整数缩放就严丝合缝（下表是按 PNG 的 alpha 通道量出来的）：
+
+| `/roms` 目录 | 遮罩 | 窗口 `x,y W×H` | 整数倍 |
+|---|---|---|---|
+| `gba` | `GBA_768P_Grid` | 32,64 960×640 | 240×160 ×4 |
+| `gb` / `gbc` | `GB_768P_SHADER_DMG` / `GBC_768P_Grid` | 112,24 800×720 | 160×144 ×5 |
+| `nes` / `famicom` / `fds` | `NES_8-7_768P` / `FC_8-7_768P` | 128,48 768×672 | 256×224 ×3 |
+| `snes` / `sfc` | `SNES_8-7_768P` / `SFC_8-7_768P` | 128,48 768×672 | 256×224 ×3 |
+| `megadrive` / `genesis` | `MD_768P` | 32,48 960×672 | 320×224 ×3 |
+| `wonderswan(color)` | `WSC_768P` | 64,96 896×576 | 224×144 ×4 |
+| `pico-8` | `PICO_768P` | 128,0 768×768 | 128×128 ×6 |
+| `ngp` / `ngpc` | `NGPC_768P` | 121,23 782×741 | 160×152 ×≈4.9，**唯一对不齐的**（差约 2%） |
+
+所以每条 override 写的是 `video_scale_integer = "true"` + `input_overlay*`，并且 `video_shader_enable = "false"`
+——`*_Grid` 版本自带半透明网格（窗口内平均 alpha 62/255，不带 Grid 的是 0），再叠 glsl 的 `lcd-grid-v2` 就重复了；
+想用 shader 就把那一行删掉。`install_masks` 会逐个校验 cfg 指向的 PNG 存在、且 IHDR 真的是 1024×768
+（用 `dd`+`od` 读，不依赖 python/PIL），因为 `full_screen = true` 会把尺寸不对的图拉伸。
+
+**"按分类"走的是 RA 的 per-content-directory override，不是 per-core**：`config_load_override()` 还会拼
+`<config_dir>/<library_name>/<ROM 的父目录名>.cfg`，并且**叠在 per-core 之上**（源码里 core → content-dir → game
+依次 append，后者胜）。这正好解决"GB 和 GBC 共用一个 Gambatte"的问题：`config/Gambatte/gb.cfg` 与
+`config/Gambatte/gbc.cfg` 各写各的遮罩。卡上实测三层都在：
+
+```
+[Override] Core-specific overrides found at ".../config/mGBA/mGBA.cfg".
+[Override] Content dir-specific overrides found at ".../config/mGBA/gba.cfg".
+[Override] Content dir-specific overrides stacking on top of previous overrides.
+```
+
+素材**不进仓库**（第三方美术、来源不明），装法：包放到卡上，然后
+`ngp-shaders.sh install_masks /home/ark/masks768.tar.gz` + `masks on`；换某一张用 `masks gba GBA_768P`
+（选择记在 `/opt/ngp-shaders/masks.conf`，`masks on` 会照着复现）。
+
+### ES 里看不到 FBNeo：系统表里根本没有这一项
+
+`/etc/emulationstation/es_systems.cfg` 有 130 个系统，街机类只有 `arcade`(→`/roms/arcade`)、`cps1/2/3`、
+`neogeo`(→`/roms/neogeo`)、`mame2003/2010`；而那 2020 个 FBNeo 游戏在 **`/roms/fbneo`**，没有任何系统指向它。
+ES 只列出**有内容的系统**，所以前端只剩 CPS1 / GBA / ports（`/roms/pico-8` 那 3 个文件同理，也没有系统项）。
+修法是在 `arcade` 之前插一个 `fbneo` 系统块：`<theme>arcade</theme>` 复用现役主题（`es-theme-nes-box`，198 个目录，
+有 `arcade` 但没有 `fbneo`）的美术，核心只列**真装了的**（`fbneo hbmame fbalpha2012 mame2003_plus mame`；
+底包 `arcade` 块里那个 `km_fbneo_xtreme_amped` 卡上并不存在）。改完 `systemctl restart emulationstation`
+（ES 是 `emulationstation.service`，重启即重扫，不用重启整机）。两个注意点：落盘前先
+`ET.fromstring()` 解析一遍——`es_systems.cfg` 语法错了 ES 会**一个系统都不显示**；原文件备份成
+`es_systems.cfg.orig-ngp`。
+
+两个 Windows/exFAT 特有的坑记在这：**exFAT 不能存符号链接**，所以两套 shader 是复制而非软链；
+**`tar` 在 exFAT 上必须加 `--no-same-owner`**，否则还原归档里的 root 属主会一路报
+`Cannot change ownership … Operation not permitted` 并以非零退出。
+
+**没进 20261015 镜像**：素材约 165 MB，而镜像里 p4 只剩 224 MB、p5 也只是底包大小（首次开机才扩到整卡）。
+所以这一步交给使用者在卡上跑一次 `install`（下载约 70 MB 压缩包），镜像本身不动。
+
+## 64 位 RetroArch 打不开（黑屏一闪）
+
+排查顺序记下来，因为这条链上有三个独立陷阱，每个都可能让人误判：
+
+1. **入口不是 RA 本体**。ES 的系统项是 `<name>retroarch</name> <path>/opt/cmds/</path>`
+   `<command>sudo perfmax %GOVERNOR% %ROM%; %ROM%; sudo perfnorm</command>`，`%ROM%` 展开成
+   `/opt/cmds/retroarch.sh`，它再调 `/usr/local/bin/retroarch`（3.1 KB 的 **dialog 控制台包装脚本**，
+   会 `chmod 666 /dev/tty0`、`printf "\033c" > /dev/tty0`、`dialog --clear`、`buttonmon.sh Test_Button_X`），
+   最后才 exec `/opt/retroarch/bin/retroarch -c ~/.config/retroarch/retroarch.cfg`（16 MB 的 ELF）。
+   所以从 SSH 直接跑那个包装脚本必然出现 `Error opening terminal: unknown.`，那是噪声不是故障；
+   另外 `perfmax` **不会 exec 它的第 2 个参数**，它只设 governor，所以看到 `perfmax` 的 sudo 记录
+   并不代表 RA 已经启动。
+2. **拿到真实报错的办法**：不要动二进制。把 `/opt/cmds/retroarch.sh` 包一层 tee
+   （备份成 `/opt/cmds/retroarch.sh.orig-ngp`），就能记下 `tty`/`TERM`/退出码；再配合 RA 自己的
+   `log_file` + `log_path`（写在 tmpfs）。本机取到的是：
+
+   ```
+   [INFO] [Vulkan] Found GPU at index 0: "Mali-G52".
+   [ERROR] [Vulkan] Failed to create KHR_display surface.
+   [ERROR] [Video] Cannot open threaded video driver. Exiting...   → rc=1
+   ```
+3. **根因**：GPU 是 **Mali-G52**，Vulkan ICD 是 `/usr/lib/aarch64-linux-gnu/libmali-bifrost-g52-g29p1.so`
+   （`rk_vk.json`，`api_version 1.3.276`），设备能枚举，但它自己的 `VK_KHR_display`→DRM 直连路径在这块
+   DSI 屏上创建表面失败；而这个 RA build 里 **`SDL_Vulkan_CreateSurface` 出现 0 次**，也就是
+   **Vulkan 没有 SDL 上下文可退**，所以没有任何配置值能救它。32 位 RA 之所以正常，是因为它用
+   `video_driver = "gl"`（SDL→KMS/DRM→GBM+EGL 这条路在本机是通的，也证明 DRM master 拿得到）。
+   **修法就是把 64 位也改成 `gl`**：`video_driver = "gl"`、`menu_driver = "glui"`，之后两套配置的差别只剩位数。
+   副作用是遮罩只能用 `.glslp`（上一节）。
+
+顺带量到两个上游缺陷，不是本次故障的原因但值得记：
+
+- `perfmax` / `perfnorm` 把 GPU 地址写死成 **`fde60000`**（RK3566/3568 的位置），本机 Mali 在
+  **`ff320000`**，所以每次启动都刷 `…/fde60000.gpu/devfreq/…/governor: No such file or directory`，
+  **GPU 频率/调速实际上从没被设过**；脚本没有 `set -e` 也不 `exit`，所以只是无效而非致命。
+- 切卡脚本反复 `mount` 而不 `umount`，我在 `/proc/mounts` 里数到 **`/roms` 被叠挂 4 次**；
+  清理办法是循环 `umount -l /roms` 到只剩一个再 `mount -o remount`。
+
+## 两张 TF 卡合并成一个 /roms（mergerfs）
+
+需求是"不用切卡就能看到两张卡的游戏"。**内核 overlayfs 在这台机器上做不到**，实测四种组合全部被拒，
+内核原话是 `overlayfs: filesystem on '<path>' not supported`（连 btrfs+vfat 也拒），因为 overlayfs 要求每层
+文件系统支持 exportfs，FAT/exFAT 不支持；`CONFIG_OVERLAY_FS=y` 也没用。Batocera 走的是 **mergerfs（FUSE 联合）**，
+它的 `batocera-storage-manager` 里就是 `POOL_PATH=/userdata/roms` + `mergerfs $OPTS "$BRANCHES" "$POOL_PATH"`，
+这条路我们照搬并且验证通过。
+
+布局（`tools/ngp-rompool.sh install|merge|status|revert`）：
+
+| 挂载点 | 内容 |
+|---|---|
+| `/mnt/roms1` | TF1 exFAT（`mmcblk1p5`，系统卡的 ROM 分区） |
+| `/mnt/roms2` | TF2 vfat（`mmcblk2p1`），`nofail`，**不在也没关系** |
+| `/roms` | `fuse.mergerfs` 联合，**所有 dArkOS 路径不用改** |
+| `/roms2` | TF2 分支的 bind，老脚本仍能找到 |
+| `/opt/system/Tools` | 从池里 bind |
+
+mergerfs 选项：`allow_other,use_ino,inodecalc=path-hash,category.create=epff,func.getattr=ff,`
+`cache.files=partial,dropcacheonclose=true,moveonenospc=true,minfreespace=4G`。
+`epff` = 同名目录已存在就写在原卡上，所以**新文件落在 TF1**，同一系统的文件不会被拆到两张卡。
+
+实测（两卡都在位）：`fbneo 2018`(TF1) + `gba 496`/`cps1 53`(TF2) **同时出现在 `/roms`**；递归合并也成立
+（TF2 独有的 `bios/nds/usrcheat.dat` 34 MB 通过池可见，`bios/fbneo` 由 79→80）；重启后五个挂载全部由 fstab
+自行拉起，`failed units: 0`，保底服务没有触发。开销：`ls -l` 一个 493 条目的目录，直挂 288 ms、池 509 ms
+（`func.getattr=ff` 比 `newest` 略快），ES 全量扫描是一次性的；文件读取吞吐看不出差别。
+
+**三个必须记住的坑：**
+1. `x-systemd.requires=` 要写**单元名**不是路径。写成 `x-systemd.requires=/mnt/roms1.mount` 时依赖解析不出来，
+   加上 `nofail` 就**静默跳过**，`systemctl status roms.mount` 还会因为保底服务挂载了 `/roms` 而显示
+   `active (mounted) What: /dev/mmcblk1p5`，非常容易被误判成"已经生效"。正确写法是 `mnt-roms1.mount`。
+2. 保底必须有：`ngp-roms-fallback.service`（`ConditionPathIsMountPoint=!/roms`）在池起不来时把 TF1 直接挂到
+   `/roms`，保证 ES 永远看得到游戏。第一次重启就是它兜住的。
+3. dArkOS 的两支 `Switch to SD2/Main SD for Roms.sh` 会 `mount` 一张卡**盖住**池、并对配置做 `/roms`↔`/roms2`
+   全局 sed，所以 `install` 给它们加了守卫（检测到池就拒绝运行，原件备份为 `*.orig-ngp`）。
+
+## GPU 调速从来没生效过（perfmax/perfnorm）
+
+`perfmax`/`perfnorm` 把 GPU 的 devfreq 地址写死成 `fde60000`（RK3566/3568）和 `ff400000`（RK3326），
+本机 Mali-G52 在 **`ff320000.gpu`**，于是每次启动只刷
+`…/fde60000.gpu/devfreq/…/governor: No such file or directory`，**GPU 频率一直没被抬起来**
+（脚本没有 `set -e` 也不 `exit`，所以只是无效而非致命，很容易看漏）。已改成自动探测：
+
+```sh
+if [ ! -d "/sys/devices/platform/${gpu}.gpu/devfreq/${gpu}.gpu" ]; then
+  _ngp_gpu=$(basename "$(ls -d /sys/class/devfreq/*.gpu | head -1)" .gpu)
+  [ -n "$_ngp_gpu" ] && gpu="$_ngp_gpu"
+fi
+```
+
+改完实测：`perfmax performance` → gpu governor `simple_ondemand → performance`、**cur_freq 300 MHz → 900 MHz**
+（本机可选 300/400/…/900 MHz），cpu 与 dmc 同时进 `performance`；`perfnorm` 干净复原成
+`simple_ondemand`/300 MHz + `ondemand` + `dmc_ondemand`。备份 `*.orig-ngp`。
+
 ## 板级要点（都是量出来的，不是猜的）
+
+
+
+
 
 - **RK817 LDO_REG8 决定一切。** 共享 dtsi 把它当 `vcc1v8_dvp` = 1.8 V、无 always-on，而 vendor DTB
   是 3.3 V + `regulator-always-on` + `regulator-boot-on`。这块轨供的是 `GPIO1_C1` 往上（含 `GPIO1_D0..D7`、
@@ -186,14 +455,44 @@ TCP 端口关闭就是它的特征。已装机的卡上额外手动 `systemctl e
 
 未做 / 保留意见：
 
-- **板载蓝牙不可用，原厂也一样。** AIC8800DC 的蓝牙是同一颗 USB 功能（`hci0` 由 `btusb` 从 `1-1:1.0/1.1` 建，
-  WiFi 在 `1-1:1.2`），但没有任何厂商初始化：dArkOS 和**原厂 EmuELEC 6.1.118 量到的特征完全相同**
-  （`Features: 00 00 00 00 60 00 00 00`、`SCO MTU 0:0`、读本地名 `Input/output error`、`btmgmt` 无 `bredr`），
-  原厂的 `aic8800DC` 固件目录也是 21 个纯 WiFi 文件、`find -iname "*bt*"` 为空，而且出厂连 `bluetooth.service`
-  都是 disabled。表现就是"能扫描到设备但连不上"。原厂 DTB 里那个 `wireless-bluetooth`/`uart1-gpios` 节点是 EVB
-  参考设计遗留 —— `uart1m0_xfer`（GPIO1_D1/D2）在本机是 L1/L2 按键，板上并没有把蓝牙接到 UART。
-  要真用蓝牙请上 **btusb 认识的 USB 蓝牙 dongle** 并安装 bluealsa（dArkOS 自己的构建注释就写着
-  `USB dongle required`）。
+- **板载蓝牙是 LE-only：能扫描、能配对、能维持链路，但经典蓝牙（A2DP 音频、HIDP/DInput、XInput）原理性不可用。**
+  AIC8800DC 的蓝牙和 WiFi 是同一颗 USB 设备的不同接口（`hci0` 由 `btusb` 从 `1-1:1.0` 建，WiFi 在 `1-1:1.2`）。
+  2026-10-16 用厂商 `aic_btusb` 打到底：`CONFIG_BLUEDROID=0`（用 `nm -u` 确认它引用内核的
+  `hci_alloc_dev`/`hci_register_dev`）+ `CONFIG_PLATFORM_UBUNTU=n` + `CONFIG_USE_FW_REQUEST=n`（它按
+  `/lib/firmware/aic8800DC/` 直接 `filp_open`，不走 `request_firmware`）。probe 读到 `chip_id=c7, sub_chip_id=2`
+  → `_u02h` 分支；原厂 `download_patch()` 里 `check_fw_status()` **返回芯片给的 0 就被当作"已在运行"从而跳过下载**，
+  把那个条件强改成 `if (1)` 之后补丁完整灌入：`fw_patch_table_8800dc_u02h.bin`(640 B) +
+  `fw_patch_8800dc_u02h.bin`(17,772 B)、`patch version - Jul 23 2025 14:07:14 - git 4e4e31c`、
+  `fw_patch_table download complete`。灌完再 `btmgmt power off/on` 重读，`Features` 仍是
+  `00 00 00 00 60 00 00 00`、`SCO MTU 0:0`、`btmgmt` 仍无 `bredr`，手工发 `Read Local Name` 回
+  `05 14 0C …`、`Read Buffer Size` 回 `05 03 0C 00`（**HCI status 0x05 = 该命令不存在**）。
+  → 缺的不是驱动、不是补丁、不是配对应答程序，而是**镜像里没有经典蓝牙协议栈**；补丁只是 ROM 之上的 patch。
+  原厂 EmuELEC 6.1.118 量到同样特征且 `bluetooth.service` 出厂 disabled，原厂 DTB 里的
+  `wireless-bluetooth`/`uart1-gpios` 是 EVB 参考设计遗留（`uart1m0_xfer` = GPIO1_D1/D2 在本机是 L1/L2 按键）。
+- **LE 侧已经完全可用**，这是本次最实质的进展：装好配对应答 agent（`tools/ngp-bt-agent.py` +
+  `ngp-bt-agent.service`，`RegisterAgent(o,s)` + `RequestDefaultAgent`，自动接受确认、`RequestPinCode` 回 `0000`）
+  之后，机械师 G3V2 PRO **`Pairing successful`**，并留下活链路
+  `hcitool con` → `< LE 98:B6:ED:xx:xx:xx handle 18 state 1 lm CENTRAL`（手柄地址已抹掉），`hciconfig` 的 `acl:` 从 0 涨到 18。
+  `/dev/uinput`（misc 10:223，0666，内核内建）、`python3-evdev`、`bluetoothd` 里的 hog 串都在，
+  **所以标准 BLE HID(HOGP) 的手柄可以在这块板上直接配对即用**；要 BT 音频仍然只能上 btusb 认识的 USB dongle
+  并安装 bluealsa（dArkOS 自己的构建注释就写着 `USB dongle required`）。
+- **G3V2 PRO 在板载蓝牙下用不成，原因在手柄侧。** 它蓝牙侧只有厂商 APP 协议：GATT 是
+  `0000ff12`（`ff13` write / `ff14` notify / `ff15` read，read 返回 `00 00 00 00`）加
+  `d7f010e0-660d-46e9-96c3-19c4148bdab5`（`…e1` write / `…e2` notify），**没有 HID Service `00001812`**。
+  两个 notify 特征 `StartNotify` 都成功，但边按按键边抓 90 秒**一条通知都没有**；再按 10 Hz 轮询唯一可读的
+  `ff15` 共 60 秒（约 600 次 `ReadValue`）**恒为 `00 00 00 00`**，所以它不是数据寄存器 —— 手柄只在收到主机发出的
+  未知厂商握手命令后才开始上报，社区也搜到这套 UUID 的公开实现，故不在这里逆向。
+  另注：EmulationStation「选项 → Bluetooth → activate existing Bluetooth device」里选它显示**连接成功是实话**
+  （`hcitool con` → `< LE … handle 18 state 1 lm CENTRAL`），但那只是 LE ACL 链路：GATT 表里没有 `00001812`，
+  `/proc/bus/input/devices` 不增加任何设备、`hidraw` 为空，**RetroArch 读不到任何东西**。而它切到 DInput 后我们的 LE 扫描**什么都看不见**（经典 HID 不发 LE 广播），
+  与上面 LE-only 的结论完全吻合 → **DInput 走板载蓝牙是原理性无解，不是没配对上**。
+  这台掌机上要用手柄，优先 **2.4G 接收器 / 有线 USB**：`usbhid`、`hid`、`hidp` 都内建在 Image 里，
+  `hid-generic`/`hid-multitouch` 已在总线注册，插上即出 `/dev/input/eventN`，不需要任何移植。
+- **可借用的第三方做法**：`tools/btaic.sh`/`btaic2.sh` 是上面那套驱动实验的可复现脚本（全部可逆，实验期间 WiFi
+  始终 0% 丢包；注意 `reboot` 不给芯片掉电，厂商补丁会留在 RAM 里）。别人移植方案里的
+  "BT/外接手柄在场时卸掉自带手柄、断开再挂回"这一招在我们卡上路径完全对得上：
+  `echo play_joystick > /sys/bus/platform/drivers/rk3562-joystick/unbind`（`bind` 反向），
+  驱动目录名与设备名和他写死的一字不差。
 - EmulationStation 的面键映射里 `a`→305、`b`→304，即机身上 **B 键是确认**。这是 owner 明确决定保留的
   （"不用改了"），不要当成 bug 再去"修"。
 - mainline 7.2.x 目前带不动这块板：RK3562 的 CRU、pinctrl、gpio、i2c、spi、uart、pwm、saradc、
