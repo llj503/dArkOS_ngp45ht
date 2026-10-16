@@ -1,0 +1,13 @@
+[Unit]
+Description=NGP45HT Bluetooth pairing agent (auto-accept)
+After=bluetooth.service
+Requires=bluetooth.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/ngp-bt-agent.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
