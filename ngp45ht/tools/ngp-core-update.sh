@@ -37,22 +37,36 @@ if [ "${1:-}" = "--32" ]; then
     BITS=32; ARCHDIR="arm7hf"; COREDIR="/home/ark/.config/retroarch32/cores"
     shift
 fi
-BACKUP="$BACKUPROOT/$(date +%Y%m%d)-$BITS"
+# SOURCE=buildbot pulls the official nightlies (231 aarch64 cores incl hbmame);
+# SOURCE=darkos keeps the old rg503/master behaviour.
+SOURCE="${SOURCE:-buildbot}"
+BBROOT="https://buildbot.libretro.com/nightly"
+if [ "$SOURCE" = "buildbot" ]; then
+    BRANCHES="latest"
+    BBARCH=$([ "$BITS" = 32 ] && echo armhf || echo aarch64)
+else
+    BBARCH=""
+fi
+
+idx_url() { if [ "$SOURCE" = buildbot ]; then echo "$BBROOT/linux/$BBARCH/latest/.index-extended"; else echo "$BASE/$1/$ARCHDIR/.index-extended"; fi; }
+so_url()  { if [ "$SOURCE" = buildbot ]; then echo "$BBROOT/linux/$BBARCH/latest/$2_libretro.so.zip";   else echo "$BASE/$1/$ARCHDIR/$2_libretro.so.zip";   fi; }
+
+BACKUP="$BACKUPROOT/$(date +%Y%m%d)-$BITS-$SOURCE"
 mkdir -p "$CACHE" "$BACKUP"
 
 # curl on the card pulls at 6 MB/s where a PC behind the same NAT gets ~11 KB/s,
 # so everything here is fetched locally.
 CURL="curl -fsSL --retry 3 --retry-delay 2 --max-time 120"
 
-fetch_index() {                        # branch -> $CACHE/$branch.$ARCHDIR
-    local b=$1 f="$CACHE/$1.$ARCHDIR"
-    [ -s "$f" ] || $CURL "$BASE/$b/$ARCHDIR/.index-extended" -o "$f" || rm -f "$f"
+fetch_index() {                        # branch -> $CACHE/$SOURCE.$branch.$ARCHDIR
+    local b=$1 f="$CACHE/$SOURCE.$1.$ARCHDIR"
+    [ -s "$f" ] || $CURL "$(idx_url "$b")" -o "$f" || { rm -f "$f"; echo "index fetch failed: $(idx_url "$b")" >&2; }
 }
 
 newest() {                             # prints "<branch> <date> <srcsha>" for $1, empty if unpublished
     local core=$1 b best="" bdate="" bsha=""
     for b in $BRANCHES; do
-        local line=$(grep -E "^[0-9-]+ +[0-9a-f]+ +${core}_libretro\.so\.zip$" "$CACHE/$b.$ARCHDIR" 2>/dev/null | head -1)
+        local line=$(grep -E "^[0-9-]+ +[0-9a-f]+ +${core}_libretro\.so\.zip$" "$CACHE/$SOURCE.$b.$ARCHDIR" 2>/dev/null | head -1)
         [ -z "$line" ] && continue
         local d=${line%% *} s=${line#* }; s=${s%% *}
         if [ -z "$best" ] || [ "$d" \> "$bdate" ]; then best=$b; bdate=$d; bsha=$s; fi
@@ -65,9 +79,9 @@ installed_names() {
 }
 
 download_so() {                        # $1=branch $2=core -> echoes path
-    local out="$CACHE/$1.$2_libretro.so"
+    local out="$CACHE/$SOURCE.$1.$2_libretro.so"
     if [ ! -s "$out" ]; then
-        $CURL "$BASE/$1/$ARCHDIR/$2_libretro.so.zip" -o "$out.zip" || { echo ""; return 1; }
+        $CURL "$(so_url "$1" "$2")" -o "$out.zip" || { echo ""; return 1; }
         unzip -p "$out.zip" > "$out" || { rm -f "$out" "$out.zip"; echo ""; return 1; }
         rm -f "$out.zip"
         # a core is an ELF shared object; anything else means we were served a page
