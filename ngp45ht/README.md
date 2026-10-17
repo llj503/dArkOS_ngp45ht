@@ -27,8 +27,10 @@ XIFAN NGP45HT 是一款 **Rockchip RK3562** 掌机：2 GB RAM、3.7 GB eMMC、10
 | `tools/ngp-bt-pair.sh` `tools/btpair.sh` `tools/btdump.sh` | 配对 CLI、扫描+自动挑目标配对、广播/GATT 取证 dump |
 | `tools/ngp-panel/` | **屏幕色温/画面调节**（移植自 ROCKNIX `paneladj`）：`panelprop.py`（ctypes 写 DRM 连接器属性，无需 sudo/modetest）、`paneladj.sh`（CLI）、`屏幕色温.sh`（ES 系统菜单中文前端）、`ngp-panel-restore.service`（开机重放）、`install.sh`（镜像/卡片两用）、`mkpsf.py` + `Unifont-CJK-panel.psf.gz`（512 字形位中文控制台字体）。详见 `tools/ngp-panel/README.md` |
 | `tools/ngp-bootspeed-fix.sh` `tools/zram-swap.service` | **设备侧**启动速度修复：干掉 fstab 里指向不存在分区的 swap 行（每次开机白等 `DefaultDeviceTimeoutSec` 90 秒），改用 zram；`--check` 只报告不改。幂等，20261017 及更早的镜像刷出来都能原地修（1m41.6s → 12.7s，实测 A/B 见 CHANGELOG） |
+| `tools/ngp-ssh-always-on.sh` | **设备侧**把 SSH 设成开机自启并立刻拉起（`--check` 只看不改）。上游 `/opt/system/Enable Remote Services.sh` 只做 `systemctl start ssh.service`，它那行 `systemctl enable ssh` 是**注释掉的**，于是每次重启 SSH 都消失、要手动去 Options 里再开一次。新卡由 `/boot/firstboot.sh` 自动处理，已装机的卡跑这个即可。**注意**：`/usr/local/bin/auto_suspend.py` 默认空闲 **30 分钟**就 `systemctl suspend`（充电时不计），睡着的机器当然不回应 SSH，超时值在 `/home/ark/.config/.TIMEOUT` |
 | `tools/ngp-rompool.sh` | **设备侧**双 TF 卡合成一个 `/roms`（mergerfs）+ `/roms2` 与 `/opt/system/Tools` 绑定挂载 + 池挂了时兜底直接挂 TF1 |
 | `tools/img-slice.py` `tools/img-compare.py` `tools/img-verify.py` | **从实机卡克隆镜像**的三件套：从上一版镜像切出读不到的片段（p1/p2 bootloader + GPT、p3 尾部 slack、尾部 p5 + 备份 GPT）、新旧镜像**逐区域**对比、镜像结构校验（GPT 两个 CRC32 都用独立实现重算、btrfs `total_bytes` 与分区尺寸比对）。**坑**：p3 的 slack 在 `PREFIX_END + P3_LEN`（16 MiB + 103,799,808 = 120,577,024），少加一个 `P3_LEN` 就会取到分区**开头**的引导扇区（开头恰好是 `mkfs.fat`，看不出来），静默污染 9,216 字节——逐区域对比才能抓到 |
+| `tools/btrfsls.py` | **离线只读**列出 btrfs rootfs 的全部路径：Windows 侧直接读卷或镜像，**不需要挂载**（本机没有 btrfs 驱动、WSL 也被禁用）。rootfs 是 `compress=zstd:1`，小文件（NetworkManager 连接配置、`.VERSION`）躺在压缩 extent 里，**对镜像做明文 grep 是假阴性**——20261017 镜像就是这么把两个家用 WiFi 的 psk 漏进公开发布包的。文件名存在 B 树叶子、元数据从不压缩，所以扫叶子是可信的：`python btrfsls.py '\\.\Volume{GUID}' --grep nmconnection`，镜像加分区偏移 `python btrfsls.py img 121634816`。**默认走当前 B 树**（从 root tree 的 ROOT_ITEM 拿到活着的树根再向下遍历）；早期版本是"扫全部物理元数据块"，那会把 COW 换下来、已经变成空闲空间的旧叶子一起读进来，**已删除的文件会复活成幽灵**——曾据此误判 `firstboot.service` 是 enabled、误判 `/etc/fstab` 还有生效的 swap 行。要考古就加 `--sweep`（会明确警告）。另：`--cat PATH` 可取文件内容（含 zstd 解压），`--stat PATH` 取 mtime/size |
 | `tools/ngp-xpad-build.sh` | 给 5.10.226 现编 `xpad.ko`（带震动）并安装 + depmod，2.4G XInput 接收器用 |
 | `tools/btaic.sh` `tools/btaic2.sh` `tools/btnotify.sh` | 厂商 `aic_btusb` 实验（含强制灌补丁）与 GATT notify/轮询抓取，全部可逆 |
 | `tools/devsh.py` | 把本地 `.sh` 推到卡上以 ark 身份执行（顺手去 CRLF），例如 `python devsh.py ngp-core-update.sh plan` |
@@ -472,22 +474,57 @@ sudo ngp-bootspeed-fix.sh           # 改（自动备份 fstab、装 zram、修 
 镜像 rootfs 里 `multi-user.target.wants/firstboot.service` 是 enable 的，所以每次刷卡会跑一次 FAT 上的
 `/boot/firstboot.sh`——这就是为什么修正可以只写进 FAT，不必 rw 挂载 btrfs。
 
-- **`boot-firstboot.sh`** 才是出厂放在 `/boot/firstboot.sh` 的那份（逐字节相同）：本板修正 **+ dArkOS 自己的首启步骤**
-  （调用 `/boot/expandtoexfat.sh` 扩容 `/roms`）。**不要手工运行它**——那会再触发一次 exFAT 扩容。
+- **`boot-firstboot.sh`** 才是出厂放在 `/boot/firstboot.sh` 的那份（逐字节相同）：本板修正 **+ 首启扩容**
+  （调用 `/boot/ngp-expand.sh`，见下一节）。**手工运行是安全的**——扩容靠分区实际大小判断，已经是
+  大分区就直接跳过；但别在已经扩过容的卡上反复跑，那会把 `/roms` 反复卸载重挂。
 - **`firstboot.sh`** 是只做修正的那部分，也就是装机卡上 `/usr/local/sbin/ngp45ht-fixes.sh` 的内容；幂等，
   重复执行打印 "already converged"。要重跑修正（例如你跑了 `/opt/system/Advanced/Fix Audio.sh` 把音频又设回 HP）
   就用它，别用上面那份。
-它做三件事：PPSSPP/RetroArch 音频与 L2/R2 修正、把上面的逻辑再落一遍、以及**密钥卫生**
-（marker `/etc/ngp45ht-hygiene.done` 保护）：删掉底包里上游作者的 `/etc/ssh/ssh_host_*_key*` 后跑
+它做四件事：PPSSPP/RetroArch 音频与 L2/R2 修正、首启扩容（下一节）、ES 主题兜底 + 版本号 +
+清 WiFi 凭据，以及**密钥卫生**
+（marker `/boot/ngp45ht-hygiene.done` 保护，**放在 `/boot` 而不是 `/etc`**：`/etc` 下的 marker 会被一起克隆进
+下一个镜像，于是每张刷出来的卡都会静默跳过这一步；克隆前记得删掉 `/boot/ngp45ht-hygiene.done`）：删掉底包里上游作者的 `/etc/ssh/ssh_host_*_key*` 后跑
 `ssh-keygen -A`，并把 `/etc/hostapd/hostapd.conf` 里的默认 `ssid`/`wpa_passphrase` 换掉。
-底包不含任何你的家用 WiFi 凭据：`/etc/NetworkManager/system-connections`、`/var/lib/NetworkManager`
-是空的，没有 `wpa_supplicant` 配置，也没有 `.ssh`。
+~~底包不含任何你的家用 WiFi 凭据：`/etc/NetworkManager/system-connections`、`/var/lib/NetworkManager`
+是空的，没有 `wpa_supplicant` 配置，也没有 `.ssh`。~~
+**这段是错的，2026-10-17 撤回**：当时是用 `grep` 扫镜像明文做的判断，而 rootfs 是 `compress=zstd:1`——
+`/etc/NetworkManager/system-connections/` 下那两个 `.nmconnection`（含明文 `psk=`）躺在压缩 extent 里，
+grep 扫不到，于是得出了"干净"的**假阴性**；用户刷卡开机后设备自动连上了家里的 WiFi，这才是真信号。
+判定有没有残留凭据只能用 `tools/btrfsls.py`（扫 btrfs 目录项名，元数据不压缩），不能靠明文 grep。
+修复：`boot-firstboot.sh` 现在会删掉 `/etc/NetworkManager/system-connections/*`，
+且**克隆镜像前必须先让它在实机上跑过一次**（删了之后克隆才干净）。
 
 **怎么确认卫生真的跑过**：`ls /etc/ngp45ht-hygiene.done`，再 `grep -E '^ssid=|^wpa_passphrase=' /etc/hostapd/hostapd.conf`。
 如果还是底包带的那对默认值，说明这张卡仍在用上游作者公开的热点口令、以及和所有同源副本共用的 SSH 主机密钥。
 2026-10-15 就发现装机卡本身**没跑过**（它的 `/boot/firstboot.sh` 还是加卫生逻辑之前的 3153 字节旧版），
 补跑后主机密钥已重生成——因此用普通 SSH 客户端连设备会看到 host key 变更告警，`ssh-keygen -R <设备IP>` 清掉即可。
 凡是"先做成镜像、之后又改 firstboot 逻辑"的情况，都要记得已装机那份不会自动更新。
+
+## 首启扩容 `/boot/ngp-expand.sh`（不照抄上游 expandtoexfat.sh）
+
+**现象**：刷完新卡开机**没有 ES 主题**、`/roms` 只有 79 MB。
+**根因**：底包的 `/boot/firstboot.sh` 被换成本板修正版时丢掉了 dArkOS 自己的首启步骤，于是
+`/roms.tar` 没解开、`/tempthemes`（5 个主题）没拷进 `/roms/themes`，而 ES 配置的 `ThemeSet`
+（`es-theme-nes-box`）**只存在于** `/roms/themes` 里——主题目录是空的，ES 就没有主题。
+扩容和"没主题"是同一个根因。
+
+`boot-ngp-expand.sh`（装机为 `/boot/ngp-expand.sh`）补上这一步，但**故意不是** `scripts/expandtoexfat.sh.rk3562`：
+
+- 上游还会 `growpart` 第 4 分区（btrfs rootfs）多留 ~11 GB"给以后的更新"。本移植 p4 必须保持
+  **12,629,049,344 字节**——发布镜像就是按这个几何切的，p4 一变大这张卡就再也克隆不出 12 GiB 镜像。
+  所以 ROMS 直接吃掉 p4 之后**全部**剩余空间（p4 11.76 GiB 里才用了 ~2.5 GiB，本来就该给 ROM）。
+- 上游最后 `cp /boot/fstab.exfat /etc/fstab`，那会**冲掉双卡 mergerfs 池**；这里改走
+  `ngp-rompool.sh install` + `merge`。
+- 上游跑 dialog 进度条、末尾 reboot；这里全部写 `/boot/ngp-firstboot.log`（在 FAT 上，PC 直接能看），
+  并且**原地**把池挂起来，ES（`After=firstboot.service`）一次开机就能用，不需要二次重启。
+- "已经扩过了"由**分区实际大小**判断（p5 ≥ 1 GiB），**不用 marker**：脚本本身在镜像里，任何 marker
+  都会被一起克隆，那样每个用户的首启都会跳过他们真正需要的扩容。唯一的例外是重启重试计数
+  `/boot/ngp-expand.retries`（成功时脚本自己删），克隆前确认它不在。
+- 每次开机都会跑一遍（firstboot 服务要留着 enabled），所以开头有快速路径：
+  `/roms` 已经是带主题的 mergerfs 池就直接退出，不做无谓的卸载重挂。
+
+日志看 `/boot/ngp-firstboot.log`。**克隆镜像前要清掉**：`ngp-firstboot.log`、`ngp45ht-hygiene.done`、
+`ngp-expand.retries`。
 
 ## 调试
 
