@@ -1,5 +1,40 @@
 # 更新记录
 
+## 2026-10-17（第二次重克隆）· `dArkOS_ngp45ht_trixie_20261017.img`
+
+同一次日期的**第二次**重克隆（第一次挂在同名 Release 上，已替换）。解压后 12,884,901,888 B，
+镜像 sha256 `cc0eaec5e1a0d5a81bd58dcacec4a169df60659253416e5a4b01d492d2f0e651`；
+`.xz` 4,291,302,552 B，sha256 `7c80bf43dca9c29208519141b4c7e8a35c8cdc34bf77c5fec797f50169e0f418`。
+**新旧分卷不能混用**，合并前用 `sha256sums.txt` 校验。
+
+### 这一版相对上一版真正修掉的事
+
+| 问题 | 根因（都可复现，不是猜的） |
+|---|---|
+| 每次重启都要手动去 Options 开一次"远程服务" | `/opt/system/Enable Remote Services.sh` 只做 `systemctl start ssh.service`，它那行 `systemctl enable ssh` **是注释掉的**。`ssh.service` 本身没被 mask、软链接有效、`sshd_not_to_be_run` 也不存在——纯粹是缺 enable。现在由 `firstboot.sh` 强制 enable + 拉起，并确认 `:22` 真的在听（失败则直接跑 `/usr/sbin/sshd` 兜底） |
+| PPSSPP 独立版左摇杆上下反 | PPSSPP 有自己的 `controls.ini`，没有 RetroArch 那种带符号的轴。RA 的 `rk3562-joystick.cfg` 是 `l_y_minus_axis="-1"`（上=负，标准极性，且 RA 里本来就是对的）→ 硬件没问题，是出厂 `An.Up/An.Down` 写反了，互换即可。`/home/ark/.config/ppsspp` 只是软链接，真身在 **`/roms/psp/ppsspp/PSP/SYSTEM/controls.ini`** |
+| 首启扩容把 p5 撑到 47 GiB 了，但开机后根本没有 `/roms` | ① `ngp-expand.sh` **先 mkfs 后 umount** —— `local-fs.target` 在 `firstboot.service` 之前就把 /roms 挂上了，等于对已挂载分区做 mkfs；② `mkfs.exfat -c 16K` 这个带后缀的写法 exfatprogs 不认（要纯字节数）。现在先卸载、`-c 16384`、mkfs 的 stderr 进日志；挂载改成三级兜底（带选项→裸→自动识别），不再硬写 `-t exfat`，mkfs 彻底失败则回退 FAT32 并同步修正 fstab |
+| 镜像里带着我的开发机 SSH 公钥 | `/home/ark/.ssh/authorized_keys` 里一条 `ngpremote` 的 ed25519。公开发布等于给每张刷出来的卡留后门。现在 `firstboot.sh` 会删掉它——**只在条目带 ` ngpremote` 标记时删**，用户自己后来装的 key 不受影响 |
+
+### 发布前的隐私取证
+
+rootfs 是 btrfs + `compress=zstd:1`，**对镜像做明文 grep 是假阴性**（小文件躺在压缩 extent 里）。
+这一版改用**离线走 B 树扫目录项**（`tools/btrfsls.py`，元数据从不压缩，文件名一定搜得到）：
+
+- `nmconnection`：**0 条** —— 两台家用 WiFi 的 psk 已清干净（上一版就是栽在这里）
+- `bash_history` / `known_hosts`：0 条；`/etc/NetworkManager/system-connections` 只剩空目录
+- `/roms` 目录为空，没有把实机的 ROM 带进镜像
+
+顺带修了 `btrfsls.py` 自己：原来"扫全部物理元数据块"会把 COW 换下来的旧叶子也读进来，
+**已删除的文件会复活成幽灵**——我曾据此误判 `firstboot.service` 是 enabled、误判 fstab 还有生效的 swap 行。
+现在默认从 root tree 的 ROOT_ITEM 走活着的树；另修了内部节点是 `btrfs_key_ptr[33]` 而非 `btrfs_item[25]` 的解析错误。
+
+### 另一个"设备失联"的真凶
+
+`/usr/local/bin/auto_suspend.py`（`autosuspend.service`）默认**空闲 30 分钟 `systemctl suspend`**
+（充电时不算，超时值读 `/home/ark/.config/.TIMEOUT`）。睡着的机器当然不回应 SSH——
+之前那次"黑屏"和这次"设备从网上消失"都可能是它。
+
 ## 2026-10-17 · 启动速度：1m41.6s → 12.7s（去掉 90 秒 device 超时）
 
 **症状**：开机到进 ES 要 1 分 41 秒。`systemd-analyze blame` 加总只有 ~20 秒的活，
