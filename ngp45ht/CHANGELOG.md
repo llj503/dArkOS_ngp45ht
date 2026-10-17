@@ -53,8 +53,23 @@ A 轮 `/proc/swaps` 里 zram 是正常在用的，所以也排除"没有 swap �
 `finishing_touches-rk3562.sh` 的 ngp45ht 段加 `systemctl disable emmc-swap`；
 新增 `tools/zram-swap.service` 与 `tools/ngp-bootspeed-fix.sh`。
 
-**已发布的 20261017 镜像是在这次修复之前克隆的，所以刷出来仍然是慢的**。
-已刷机的机器跑一次 `sudo ngp-bootspeed-fix.sh` 重启即可（10 秒的事，不必重刷）。
+**镜像已重新克隆**：镜像是在这次修复**之前**克隆的，所以那一版刷出来仍然是慢的
+（`dArkOS_ngp45ht_trixie_20261017.img` 旧 sha256 `f1318119…`，整包旧 `4aa9ff57…`）。
+修复后从同一张实机卡重新克隆了一遍，发布了同名的新版：
+
+| 项 | 值 |
+|---|---|
+| 解压后 | 12,884,901,888 B（12 GiB 整） |
+| 镜像 sha256 | `b8975e53d3d4ae27a1cfe9a8dad34a0bc4eb9b6ad71dc32c75baf601f787f554` |
+| 整包 `.xz` | **4,287,563,072 B**，sha256 `e16881fce547af615cc4c5b1665387e8b42f7f8a296f8f52a60550fbbf01600e` |
+| 分卷 | 1,992,294,400 ×2 + 302,974,272，`sha256sums.txt` 里有逐卷哈希 |
+
+**新旧分卷不要混用**，合并前用 `sha256sums.txt` 校验。
+
+逐区域对比（不是只看整体哈希）：bootloader + GPT、对齐间隙、尾部（p5 + 备份 GPT）**逐字节相同**；
+p3 `dArkOS_Fat` 只有**开头 4 KiB** 不同（FAT32 引导扇区/FSInfo，挂载时会更新），`Image` 与 DTB 完全没变；
+p4 rootfs 1505 个 8 MiB 块里 **28 个**不同（1.9%），就是上面那几处改动。
+已刷旧版的机器不必重刷，跑一次 `sudo ngp-bootspeed-fix.sh` 重启即可。
 
 **一个前置欠账**：journald 没有持久化，`journalctl --list-boots` 只有一次启动，
 事发那几次的日志拿不到，所以上面用的是 A/B 而不是翻日志。持久化 journald 仍是待办

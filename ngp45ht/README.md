@@ -28,7 +28,7 @@ XIFAN NGP45HT 是一款 **Rockchip RK3562** 掌机：2 GB RAM、3.7 GB eMMC、10
 | `tools/ngp-panel/` | **屏幕色温/画面调节**（移植自 ROCKNIX `paneladj`）：`panelprop.py`（ctypes 写 DRM 连接器属性，无需 sudo/modetest）、`paneladj.sh`（CLI）、`屏幕色温.sh`（ES 系统菜单中文前端）、`ngp-panel-restore.service`（开机重放）、`install.sh`（镜像/卡片两用）、`mkpsf.py` + `Unifont-CJK-panel.psf.gz`（512 字形位中文控制台字体）。详见 `tools/ngp-panel/README.md` |
 | `tools/ngp-bootspeed-fix.sh` `tools/zram-swap.service` | **设备侧**启动速度修复：干掉 fstab 里指向不存在分区的 swap 行（每次开机白等 `DefaultDeviceTimeoutSec` 90 秒），改用 zram；`--check` 只报告不改。幂等，20261017 及更早的镜像刷出来都能原地修（1m41.6s → 12.7s，实测 A/B 见 CHANGELOG） |
 | `tools/ngp-rompool.sh` | **设备侧**双 TF 卡合成一个 `/roms`（mergerfs）+ `/roms2` 与 `/opt/system/Tools` 绑定挂载 + 池挂了时兜底直接挂 TF1 |
-| `tools/ngp-p1-switch.sh` | 外接手柄（USB/2.4G/BLE）在场时把内建手柄解绑让出 P1，走了自动绑回；udev 事件驱动 |
+| `tools/img-slice.py` `tools/img-compare.py` `tools/img-verify.py` | **从实机卡克隆镜像**的三件套：从上一版镜像切出读不到的片段（p1/p2 bootloader + GPT、p3 尾部 slack、尾部 p5 + 备份 GPT）、新旧镜像**逐区域**对比、镜像结构校验（GPT 两个 CRC32 都用独立实现重算、btrfs `total_bytes` 与分区尺寸比对）。**坑**：p3 的 slack 在 `PREFIX_END + P3_LEN`（16 MiB + 103,799,808 = 120,577,024），少加一个 `P3_LEN` 就会取到分区**开头**的引导扇区（开头恰好是 `mkfs.fat`，看不出来），静默污染 9,216 字节——逐区域对比才能抓到 |
 | `tools/ngp-xpad-build.sh` | 给 5.10.226 现编 `xpad.ko`（带震动）并安装 + depmod，2.4G XInput 接收器用 |
 | `tools/btaic.sh` `tools/btaic2.sh` `tools/btnotify.sh` | 厂商 `aic_btusb` 实验（含强制灌补丁）与 GATT notify/轮询抓取，全部可逆 |
 | `tools/devsh.py` | 把本地 `.sh` 推到卡上以 ark 身份执行（顺手去 CRLF），例如 `python devsh.py ngp-core-update.sh plan` |
