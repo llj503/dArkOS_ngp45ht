@@ -7,7 +7,11 @@ if [ "$CHIPSET" == "rk3562" ]; then
 else
   PPSSPP_TAG=$(curl -s https://raw.githubusercontent.com/christianhaitian/${CORE_BUILDS_CHIPSET}_core_builds/refs/heads/master/scripts/ppsspp.sh | grep -oP '(?<=TAG=").*?(?=")')
 fi
-if [ -f "Arkbuild_package_cache/${CHIPSET}/ppsspp_${UNIT}.tar.gz" ] && [ "$(cat Arkbuild_package_cache/${CHIPSET}/ppsspp_${UNIT}.commit)" == "${PPSSPP_TAG}" ]; then
+# Same reasoning as build_fake08.sh: the upstream tag does not move when we
+# change compiler flags in the recipe, and this one carries the
+# -fno-stack-protector work.
+PPSSPP_RECIPE_SHA=$(sha1sum ${CHIPSET}_core_builds/scripts/ppsspp.sh 2>/dev/null | cut -c1-12)
+if [ -f "Arkbuild_package_cache/${CHIPSET}/ppsspp_${UNIT}.tar.gz" ] && [ "$(cat Arkbuild_package_cache/${CHIPSET}/ppsspp_${UNIT}.commit)" == "${PPSSPP_TAG}-${PPSSPP_RECIPE_SHA}" ]; then
     sudo tar -xvzpf Arkbuild_package_cache/${CHIPSET}/ppsspp_${UNIT}.tar.gz
 else
 	if [ "$CHIPSET" == "rk3562" ]; then
@@ -24,6 +28,18 @@ else
 	    rm -f Arkbuild/home/ark/${CHIPSET}_core_builds/patches/ppsspp-patch-010-rk3562-vulkan-rotation.patch
 	  fi
 	fi
+	# PPSSPP is the only emulator we build from source that still picks up
+	# Debian gcc's default -fstack-protector-strong and _FORTIFY_SOURCE=2:
+	# RetroArch, Flycast, ScummVM, PCSX2 and Mednafen all come out without
+	# them because their own build systems set the flags. Those checks land
+	# in the JIT and GPU hot paths, and this is an offline handheld that only
+	# runs ROMs its owner put there, so drop them here too.
+	# The flags live in rk3562_core_builds/scripts/ppsspp.sh, on the two
+	# -DCMAKE_{C,CXX}_FLAGS arguments. Exporting CFLAGS/CXXFLAGS here does
+	# nothing: cmake only falls back to the environment when those cache
+	# variables are unset, and that script sets both. This was exactly that
+	# mistake until 2026-09-16, when the generated flags.make showed
+	# -mtune=cortex-a53 present and -fno-stack-protector absent.
 	call_chroot "cd /home/ark &&
 	  cd ${CHIPSET}_core_builds &&
 	  chmod 777 builds-alt.sh &&
@@ -40,7 +56,7 @@ else
 	  sudo rm -f Arkbuild_package_cache/${CHIPSET}/ppsspp_${UNIT}.commit
 	fi
 	sudo tar -czpf Arkbuild_package_cache/${CHIPSET}/ppsspp_${UNIT}.tar.gz Arkbuild/opt/ppsspp/
-	echo "${PPSSPP_TAG}" > Arkbuild_package_cache/${CHIPSET}/ppsspp_${UNIT}.commit
+	echo "${PPSSPP_TAG}-${PPSSPP_RECIPE_SHA}" > Arkbuild_package_cache/${CHIPSET}/ppsspp_${UNIT}.commit
 fi
 sudo cp ppsspp/gamecontrollerdb.txt.${UNIT} Arkbuild/opt/ppsspp/assets/gamecontrollerdb.txt
 if [ -f "ppsspp/ppsspp.sh.${UNIT}" ]; then

@@ -8,6 +8,19 @@ else
   gpu="fde60000"
 fi
 
+# The GPU node differs per SoC - ff400000 on RK3326, fde60000 on RK3566,
+# ff320000 on RK3562 - and every write below goes to
+# /sys/devices/platform/${gpu}.gpu/devfreq/${gpu}.gpu/. Hardcoding it meant
+# that on RK3562 each of those writes landed on a path that does not exist,
+# failed silently, and left the GPU on simple_ondemand for the whole game.
+# Ask the kernel instead, and keep the old value as a fallback.
+for _devfreq in /sys/class/devfreq/*.gpu; do
+  [ -e "${_devfreq}" ] || continue
+  _name="$(basename "${_devfreq}")"
+  gpu="${_name%.gpu}"
+  break
+done
+
 if [ -e "/home/ark/.config/.GameLoadingIModeASCII" ] && [[ $(tty) != *"pts"* ]]; then
   if [ -f "/roms/launchimages/loading.ascii" ]; then
     echo -en "\033[21m" > /dev/tty1 && cat /roms/launchimages/loading.ascii > /dev/tty1
@@ -50,6 +63,9 @@ elif [ -e "/home/ark/.config/.GameLoadingIModePIC" ] && [[ $(tty) != *"pts"* ]];
 else
   clear > /dev/tty1
 fi
+
+# out of the "overclock" mode, if the game ran in it (RG52 Mini)
+[ -x /usr/local/bin/perfoc ] && /usr/local/bin/perfoc off
 
 echo simple_ondemand > /sys/devices/platform/${gpu}.gpu/devfreq/${gpu}.gpu/governor
 echo ondemand > /sys/devices/system/cpu/cpufreq/policy0/scaling_governor

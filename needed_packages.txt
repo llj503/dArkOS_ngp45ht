@@ -99,3 +99,4 @@ wget
 xfsprogs
 xxd
 zip
+firmware-realtek

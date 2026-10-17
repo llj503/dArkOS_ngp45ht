@@ -72,7 +72,7 @@ PreBlockCheckIOP = false
 
 
 [EmuCore/GS]
-DisplayRotation = 90
+DisplayRotation = 0
 VsyncQueueSize = 2
 FrameLimitEnable = true
 VsyncEnable = 0

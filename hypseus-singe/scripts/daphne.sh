@@ -28,7 +28,7 @@ if  [[ $1 == "standalone" ]]; then
   fi
 
   #./hypseus-singe "$basefilename" vldp -gamepad ${RES} -framefile "$dir/$basefilename.txt" -fullscreen -useoverlaysb 2 $extraparams
-  ./hypseus-singe "$basefilename" vldp -gamepad -texturestream ${RES} -framefile "$dir/$basefilename.txt" -fullscreen -useoverlaysb 2 $extraparams
+  ./hypseus-singe "$basefilename" vldp -gamepad -texturestream ${RES} -framefile "$dir/$basefilename.txt" -fullscreen $extraparams
 
   rm *.csv
 

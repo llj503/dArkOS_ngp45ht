@@ -74,8 +74,8 @@ if [ "$?" -eq "10" ]; then
                   "4)" "Bluetooth"
                   "5)" "Enable Remote Services"
                   "6)" "351Files"
-                  "7)" "Backup ArkOS Settings"
-                  "8)" "Restore ArkOS Settings"
+                  "7)" "Backup dArkOS Settings"
+                  "8)" "Restore dArkOS Settings"
                   "9)" "Reboot"
                   "10)" "Power Off"
           )
@@ -120,11 +120,11 @@ if [ "$?" -eq "10" ]; then
                           "6)") /opt/system/351Files.sh 2>&1 > /dev/tty1
                                 ;;
                           "7)") kill_boot_controls
-                                /opt/system/Advanced/"Backup ArkOS Settings.sh" 2>&1 > /dev/tty1
+                                /opt/system/Advanced/"Backup dArkOS Settings.sh" 2>&1 > /dev/tty1
                                 boot_controls
                                 ;;
                           "8)") kill_boot_controls
-                                /opt/system/Advanced/"Restore ArkOS Settings.sh" 2>&1 > /dev/tty1
+                                /opt/system/Advanced/"Restore dArkOS Settings.sh" 2>&1 > /dev/tty1
                                 boot_controls
                                 ;;
                           "9)") sudo reboot

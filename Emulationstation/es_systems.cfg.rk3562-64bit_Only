@@ -1233,7 +1233,13 @@
 		<fullname>NDS</fullname>
 		<path>/roms/nds/</path>
 		<extension>.7z .7Z .nds .NDS .zip .ZIP</extension>
-		<command>sudo perfmax %GOVERNOR% %ROM%; nice -n -19 /usr/local/bin/drastic.sh %ROM%; sudo perfnorm</command>
+		<command>sudo perfmax %GOVERNOR% %ROM%; nice -n -19 /usr/local/bin/nds.sh %EMULATOR% %ROM%; sudo perfnorm</command>
+		<emulators>
+			<emulator name="drastic">
+			</emulator>
+			<emulator name="dsperate">
+			</emulator>
+		</emulators>
 		<platform>nds</platform>
 		<theme>nds</theme>
 		<manufacturer>Nintendo</manufacturer>
@@ -2343,7 +2349,7 @@
 		<fullname>Ports</fullname>
 		<path>/roms/ports/</path>
 		<extension>.sh .SH</extension>
-		<command>sudo perfmax %GOVERNOR% %ROM%; nice -n -19 %ROM%; sudo perfnorm</command>
+		<command>sudo perfmax %GOVERNOR% %ROM%; nice -n -19 /usr/local/bin/runport.sh %ROM%; sudo perfnorm</command>
 		<platform>pc</platform>
 		<theme>ports</theme>
 		<manufacturer>Various</manufacturer>

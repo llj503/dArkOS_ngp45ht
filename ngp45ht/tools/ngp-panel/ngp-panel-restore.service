@@ -1,0 +1,17 @@
+[Unit]
+Description=NGP45HT panel colour restore (VOP2 BCSH brightness/contrast/saturation/hue)
+# DRM connector properties reset to 50 on every boot, so the persisted values
+# in /opt/ngp-panel/panel.conf have to be re-applied.  Writes need no DRM
+# master and no root (card0 is group video), this is just the boot hook.
+After=dev-dri-card0.device
+Wants=dev-dri-card0.device
+
+[Service]
+Type=oneshot
+# give the rockchip DRM driver a moment to finish binding before writing
+ExecStartPre=/bin/sleep 2
+ExecStart=/opt/ngp-panel/paneladj.sh restore
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

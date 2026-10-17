@@ -29,14 +29,26 @@ fi
 sudo mkdir -p Arkbuild/home/ark/.config/flycast
 sudo cp flycast/config/emu.cfg Arkbuild/home/ark/.config/flycast/
 
-# RG52 Mini portrait panel: run flycast in Vulkan and rotate with flycast's own
-# renderer (rend.Rotate90). SDL2's RGA rotation only covers the GL swap path and
-# explicitly skips Vulkan windows, so Vulkan flycast would otherwise be unrotated.
+# RG52 Mini portrait panel: run flycast in Vulkan, which VK_LAYER_DARKOS_rotate
+# turns onto the panel (build_vkrotate.sh). flycast links the system SDL2
+# (USE_HOST_SDL in the recipe; on Linux it would build its own static copy).
+# Our SDL shows it a landscape 1280x720 display, which matches the mode the
+# layer reports, and turns its GL fallback with the RGA. The window is
+# 1280x720 as well, so that flycast presents at the panel's own size. With the
+# shipped 640x480 SDL looks for a Vulkan display mode of that size: the driver
+# cannot make one, and before the layer's scaled modes flycast fell back to GL
+# (upright, but not Vulkan); now it would get a 640x480 picture scaled up to
+# 960x720. With its own SDL it saw the panel's
+# 720x1280, found no such Vulkan display mode, fell back to GL, and drew
+# sideways or, with Rotate90, upside down. Before the layer,
+# Rotate90=yes with flycastsa-patch-004 rotated Vulkan; with the layer that
+# would rotate twice, so Rotate90 stays off.
 # Landscape devices (rg43h) and other chipsets keep the GL default (pvr.rend=0,
 # Rotate90=no) where SDL2 handles rotation.
 if [ "$UNIT" == "rg52mini" ]; then
-  sudo sed -i 's/^pvr.rend = .*/pvr.rend = 4/'            Arkbuild/home/ark/.config/flycast/emu.cfg
-  sudo sed -i 's/^rend.Rotate90 = .*/rend.Rotate90 = yes/' Arkbuild/home/ark/.config/flycast/emu.cfg
+  sudo sed -i 's/^pvr.rend = .*/pvr.rend = 4/'           Arkbuild/home/ark/.config/flycast/emu.cfg
+  sudo sed -i 's/^rend.Rotate90 = .*/rend.Rotate90 = no/' Arkbuild/home/ark/.config/flycast/emu.cfg
+  sudo sed -i '/^\[window\]/,/^\[/{s/^width = .*/width = 1280/;s/^height = .*/height = 720/}' Arkbuild/home/ark/.config/flycast/emu.cfg
 fi
 
 call_chroot "chown -R ark:ark /opt/"

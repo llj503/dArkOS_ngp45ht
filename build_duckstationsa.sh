@@ -13,7 +13,8 @@
 # ~/.local/share/duckstation/. Portrait rotation for the RG52 Mini is handled by
 # [Display] Rotation = Rotate90 in settings.ini.rg52mini (no source patch, unlike
 # flycast) — the AppImage bundles its own SDL3, so our SDL2 RGA rotation does not
-# apply to it.
+# apply to it. Its SDL3 asks Vulkan for a 720x1280 mode, and VK_LAYER_DARKOS_rotate
+# hands it the panel as it is, nothing turned (docs/KNOWN-ISSUES.md).
 
 DUCKSTATION_APPIMAGE="duckstation/duckstation-sa-0.1-10495.AppImage"
 

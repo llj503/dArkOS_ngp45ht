@@ -14,7 +14,20 @@
 # Create extlinux.conf for boot
 sudo mkdir -p ${mountpoint}/extlinux
 # Build kernel command line — portrait-panel devices need fbcon rotation
-KCMD_BASE="root=/dev/mmcblk1p4 rootfstype=btrfs initrd=/uInitrd rootwait rw fsck.repair=yes quiet splash net.ifnames=0 console=ttyFIQ0,1500000 console=tty1 plymouth.ignore-serial-consoles consoleblank=0 loglevel=0"
+# console=tty1 is gone on purpose. With it, every kernel message is printed
+# onto the panel, straight over the boot logo. Messages now go only to the
+# serial port, which is where anyone debugging this will be looking anyway.
+#
+# loglevel is 5 rather than 0 because fbcon refuses to draw the logo at all
+# when console_loglevel <= CONSOLE_LOGLEVEL_QUIET, which is 4:
+#   fbcon.c: if (logo_shown < 0 && console_loglevel <= CONSOLE_LOGLEVEL_QUIET)
+#                logo_shown = FBCON_LOGO_DONTSHOW;
+# Nothing extra reaches the screen from raising it, since the panel is no
+# longer a console.
+#
+# vt.global_cursor_default=0 hides the blinking cursor the logo would
+# otherwise sit behind (rg43h already carries this on rk3566).
+KCMD_BASE="root=/dev/mmcblk1p4 rootfstype=btrfs initrd=/uInitrd rootwait rw fsck.repair=yes quiet splash net.ifnames=0 console=ttyFIQ0,1500000 plymouth.ignore-serial-consoles consoleblank=0 vt.global_cursor_default=0 loglevel=5"
 if [ "$UNIT" == "rg52mini" ]; then
   KCMD_VIDEO="video=HDMI-A-1:1280x720@60 fbcon=rotate:1"
 else
@@ -80,9 +93,236 @@ Restart=no
 RemainAfterExit=yes
 EOF
 
-  # Enable bluetooth by default — bluez handles USB dongle hotplug via btusb
-  call_chroot "systemctl enable bluetooth bluealsa enable_bluetooth"
+  # Enable bluetooth by default — bluez handles USB dongle hotplug via btusb.
+  # bluealsa only if it is actually there: enabling a unit whose binary is
+  # missing gives a device that prints "Failed to start bluealsa.service" on
+  # every boot and offers no clue why. That happened once already, when Kodi's
+  # dependency resolution removed libasound2-dev and bluez-alsa then failed to
+  # configure - the build carried on regardless and the service was enabled.
+  # BlueZ refuses HID from a device it does not consider bonded, and has done
+  # by default since 5.6x (ClassicBondedOnly, true unless told otherwise).
+  # Plenty of Bluetooth gamepads pair the old way and never bond, so they pair
+  # happily, show up as Connected, and then produce no input device at all -
+  # the only sign is one line in the daemon log:
+  #
+  #   profiles/input/device.c:hidp_add_connection()
+  #   Rejected connection from !bonded device /org/bluez/hci0/dev_XX_XX_...
+  #
+  # The trade is real: an unbonded HID link can be spoofed, and a spoofed HID
+  # link is keystrokes. On a handheld that stores no credentials and whose
+  # alternative is "gamepads do not work", it is the right way round.
+  if [ -f Arkbuild/etc/bluetooth/input.conf ]; then
+    if ! grep -q '^ClassicBondedOnly' Arkbuild/etc/bluetooth/input.conf; then
+      sudo sed -i 's/^\[General\]/[General]\nClassicBondedOnly=false/' \
+        Arkbuild/etc/bluetooth/input.conf
+    fi
+  fi
+
+  # bluez-alsa 4.x renamed the daemon to bluealsad (and bluealsa-cli to
+  # bluealsactl), so test for both: the old name for anything older, the new
+  # one for what we build today. Testing only the old name is how a working
+  # build was reported as missing.
+  if sudo test -x Arkbuild/usr/bin/bluealsad || sudo test -x Arkbuild/usr/bin/bluealsa; then
+    call_chroot "systemctl enable bluetooth bluealsa enable_bluetooth"
+  else
+    echo "WARNING: the bluealsa daemon is missing - enabling bluetooth without it."
+    echo "         Bluetooth input will work; Bluetooth audio will not."
+    call_chroot "systemctl enable bluetooth enable_bluetooth"
+  fi
 fi
+
+# Kernel modules are built with CONFIG_DEBUG_INFO=y, same as the vendor's
+# EmuELEC config.  EmuELEC strips them while packing its squashfs; we have no
+# such step, so the DWARF rides along into the image - 97% of every .ko.
+# Measured on a trivial DVB driver: a8293.ko 359304 -> 9968 bytes.
+# --strip-debug, never a plain strip: the symbol table carries the CRCs that
+# CONFIG_MODVERSIONS=y checks at load time, and without it nothing loads -
+# including aic8800, i.e. no wifi.
+echo "Stripping debug info from kernel modules..."
+MODSTRIP="$(ls ${PWD}/prebuilts/gcc/linux-x86/aarch64/*/bin/aarch64-linux-gnu-strip 2>/dev/null | head -1)"
+if [ -z "${MODSTRIP}" ]; then
+  MODSTRIP=/opt/toolchains/gcc-linaro-6.3.1-2017.05-x86_64_aarch64-linux-gnu/bin/aarch64-linux-gnu-strip
+fi
+if [ -x "${MODSTRIP}" ]; then
+  echo "  modules before: $(sudo du -sh Arkbuild/lib/modules 2>/dev/null | cut -f1)"
+  sudo find Arkbuild/lib/modules -name '*.ko' -exec "${MODSTRIP}" --strip-debug {} +
+  echo "  modules after:  $(sudo du -sh Arkbuild/lib/modules 2>/dev/null | cut -f1)"
+else
+  echo "  WARNING: no aarch64 strip found, modules keep their debug info"
+fi
+
+# Second swap tier on the eMMC, behind zram.  The 256 MB GPT partition named
+# "swap" is there on these devices but ships unformatted (filled with 0xcc),
+# so it needs one mkswap before it is usable.  That is the one destructive
+# step in this whole image, so it is fenced in:
+#
+#   - the partition is found by GPT label, never by a device path, so it
+#     cannot drift onto mmcblk0p3 because someone repartitioned;
+#   - blkid must report either nothing or an existing swap.  Any filesystem
+#     down there and the script refuses and says so;
+#   - the size has to look like the partition we expect;
+#   - it must not be mounted.
+#
+# Priority 10, below zram's 100: zram takes everything it can compress and
+# only what it cannot reaches the flash.  This matters for eMMC wear.
+echo "Installing eMMC swap service..."
+sudo tee Arkbuild/usr/local/sbin/emmc-swap > /dev/null <<'EMMCEOF'
+#!/bin/sh
+# Enable the eMMC swap partition as a second tier behind zram.
+set -e
+DEV=/dev/disk/by-partlabel/swap
+
+# udev may not have laid out /dev/disk/by-partlabel yet. Wait, briefly, rather
+# than exiting quietly and leaving swap off with nothing to show for it.
+i=0
+while [ ! -b "$DEV" ] && [ $i -lt 30 ]; do
+    sleep 1
+    i=$((i + 1))
+done
+if [ ! -b "$DEV" ]; then
+    echo "emmc-swap: no partition labelled 'swap' after ${i}s, nothing to do" >&2
+    exit 0
+fi
+REAL=$(readlink -f "$DEV")
+grep -q "^$REAL " /proc/swaps && exit 0
+
+# Never touch something that is mounted.
+if grep -q "^$REAL " /proc/mounts; then
+    echo "emmc-swap: $REAL is mounted, refusing" >&2
+    exit 0
+fi
+
+# Never touch something that already holds a filesystem.
+TYPE=$(blkid -o value -s TYPE "$REAL" 2>/dev/null || true)
+case "$TYPE" in
+    swap) swapon "$REAL" -p 10; exit 0 ;;
+    "")   ;;   # raw, as shipped - safe to format
+    *)    echo "emmc-swap: $REAL holds $TYPE, refusing to mkswap" >&2; exit 0 ;;
+esac
+
+# Sanity-check the size before formatting: 64 MB .. 2 GB.
+SZ=$(blockdev --getsize64 "$REAL" 2>/dev/null || echo 0)
+if [ "$SZ" -lt 67108864 ] || [ "$SZ" -gt 2147483648 ]; then
+    echo "emmc-swap: $REAL is $SZ bytes, not the expected swap partition" >&2
+    exit 0
+fi
+
+echo "emmc-swap: formatting $REAL ($SZ bytes) as swap"
+mkswap -L rg52swap "$REAL" > /dev/null
+swapon "$REAL" -p 10
+EMMCEOF
+sudo chmod 755 Arkbuild/usr/local/sbin/emmc-swap
+
+sudo tee Arkbuild/etc/systemd/system/emmc-swap.service > /dev/null <<'EMMCUNITEOF'
+[Unit]
+Description=Swap on the eMMC swap partition (second tier, behind zram)
+# No DefaultDependencies=no here: this one needs /dev/disk/by-partlabel, which
+# only exists once udev has run, and the default ordering after sysinit.target
+# is what guarantees that.
+Wants=systemd-udev-settle.service
+After=systemd-udev-settle.service local-fs.target zram-swap.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/emmc-swap
+ExecStop=/bin/sh -c 'swapoff /dev/disk/by-partlabel/swap 2>/dev/null || true'
+
+[Install]
+WantedBy=multi-user.target
+EMMCUNITEOF
+
+call_chroot "systemctl enable emmc-swap"
+
+# Compressed swap in RAM.  The RG52 Mini has 2 GB, which Dolphin and PCSX2 can
+# exhaust; swapping to compressed RAM is far cheaper than swapping to the eMMC,
+# and costs nothing when unused.  Priority 100 deliberately outranks any
+# on-disk swap (the rg43h fstab entry uses pri=10), so zram always fills first
+# and the slow device only takes what zram could not compress.
+echo "Installing zram swap..."
+sudo tee Arkbuild/usr/local/sbin/zram-swap > /dev/null <<'ZRAMEOF'
+#!/bin/sh
+# Bring up /dev/zram0 as swap.  CONFIG_ZRAM=y, so the device already exists;
+# modprobe is only a fallback for a modular kernel.
+set -e
+DEV=/dev/zram0
+SIZE=1536M        # a ceiling, not a reservation: RAM is taken as pages arrive.
+                  # Bigger means the eMMC tier below is reached later, which is
+                  # the only real lever on how much gets written to flash.
+# Preference order, first one the kernel offers wins. Writing a name that is
+# not in comp_algorithm fails silently and leaves the default in place, so the
+# list is walked against what the kernel actually reports.
+#
+# lzo-rle leads because speed is what matters here: four A53s are the scarce
+# resource, and zram only earns its keep if compressing costs less than the
+# fault it avoids. It has been the kernel's own default since 5.1 for the same
+# reason. lz4 is next (the kernel now carries it, see CONFIG_CRYPTO_LZ4), then
+# zstd, which compresses appreciably better and would push the eMMC tier
+# further out of reach - move it to the front if RAM turns out to be tighter
+# than CPU.
+ALGO_PREF="lzo-rle lz4 zstd lzo"
+
+[ -e "$DEV" ] || modprobe zram num_devices=1 2>/dev/null || true
+[ -e "$DEV" ] || exit 0
+grep -q "^$DEV " /proc/swaps && exit 0
+
+swapoff "$DEV" 2>/dev/null || true
+echo 1 > /sys/block/zram0/reset 2>/dev/null || true
+AVAIL=$(tr -d "[]" < /sys/block/zram0/comp_algorithm 2>/dev/null)
+ALGO=""
+for a in $ALGO_PREF; do
+    for have in $AVAIL; do
+        if [ "$a" = "$have" ]; then ALGO="$a"; break 2; fi
+    done
+done
+if [ -n "$ALGO" ]; then
+    echo "$ALGO" > /sys/block/zram0/comp_algorithm
+    echo "zram: compressing with $ALGO"
+else
+    echo "zram: none of '$ALGO_PREF' available ($AVAIL), keeping the default" >&2
+fi
+echo "$SIZE" > /sys/block/zram0/disksize
+mkswap "$DEV" > /dev/null
+swapon "$DEV" -p 100
+ZRAMEOF
+sudo chmod 755 Arkbuild/usr/local/sbin/zram-swap
+
+sudo tee Arkbuild/etc/systemd/system/zram-swap.service > /dev/null <<'ZRAMUNITEOF'
+[Unit]
+Description=Compressed swap in RAM (zram)
+DefaultDependencies=no
+# Not After=local-fs.target: tmp.mount, like every tmpfs mount, is After
+# swap.target, and local-fs.target After tmp.mount, so that made a cycle that
+# systemd broke at boot by dropping either this job (no zram swap) or
+# tmp.mount (no tmpfs /tmp), depending on the boot. The script needs only the
+# root filesystem and /sys.
+After=systemd-modules-load.service systemd-remount-fs.service
+Before=swap.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/zram-swap
+ExecStop=/sbin/swapoff /dev/zram0
+
+[Install]
+WantedBy=multi-user.target
+ZRAMUNITEOF
+
+# Swapping into RAM is cheap, so lean on it harder than the default of 60.
+sudo tee Arkbuild/etc/sysctl.d/99-zram.conf > /dev/null <<SYSCTLEOF
+# Swapping into compressed RAM is cheap, so lean on it harder than the
+# default of 60. The eMMC tier sits at priority 10 and only sees what zram
+# could not take, so a high value here does not translate into flash writes.
+vm.swappiness = 100
+
+# One page per swap-in instead of eight. The default assumes a rotating disk
+# where reading ahead is nearly free; with zram every extra page costs a
+# decompression that is usually wasted.
+vm.page-cluster = 0
+SYSCTLEOF
+
+call_chroot "systemctl enable zram-swap"
 
 # Sleep script and set default SuspendState to freeze
 sudo mkdir -p Arkbuild/usr/lib/systemd/system-sleep
@@ -128,6 +368,21 @@ cat <<EOF | sudo tee ${mountpoint}/fstab.exfat
 /roms/tools /opt/system/Tools none nofail,x-systemd.device-timeout=7,bind${SWAP_LINE}
 EOF
 
+# The same for a dual-boot "dArkOS + GammaOS" card, where partition 5 is
+# GammaOS's boot FAT and the ROMs come from the Android storage instead
+# (darkos-androidroms.service mounts them and binds /opt/system/Tools).
+cat <<EOF | sudo tee ${mountpoint}/fstab.dualboot
+/dev/mmcblk1p4  /  ${ROOT_FILESYSTEM_FORMAT} ${ROOT_FILESYSTEM_MOUNT_OPTIONS} 0 0
+
+/dev/mmcblk1p3 /boot vfat defaults,noatime 0 0${SWAP_LINE}
+EOF
+
+# Dual-boot card: ROMs from Android's userdata. Does nothing without
+# /boot/dualboot, which the combined image's builder puts there.
+sudo install -m 755 scripts/rk3562/darkos-androidroms.sh Arkbuild/usr/local/sbin/darkos-androidroms
+sudo install -m 644 scripts/rk3562/darkos-androidroms.service Arkbuild/etc/systemd/system/darkos-androidroms.service
+sudo chroot Arkbuild/ bash -c "systemctl enable darkos-androidroms"
+
 # Disable getty on tty0 and tty1
 sudo chroot Arkbuild/ bash -c "systemctl disable getty@tty0.service getty@tty1.service"
 
@@ -165,6 +420,33 @@ sudo cp scripts/wifi-driver-load.sh Arkbuild/usr/local/bin/wifi-driver-load.sh
 sudo chmod 755 Arkbuild/usr/local/bin/wifi-driver-load.sh
 sudo cp scripts/wifi-driver-load.service Arkbuild/etc/systemd/system/wifi-driver-load.service
 sudo chroot Arkbuild/ bash -c "systemctl enable wifi-driver-load"
+
+# Import wifikeyfile.txt from the Tools folder at boot (upstream wifi_importer,
+# reordered so it never holds EmulationStation back - see the unit).
+sudo install -m 644 scripts/rk3562/wifi_importer.service Arkbuild/etc/systemd/system/wifi_importer.service
+sudo chroot Arkbuild/ bash -c "systemctl enable wifi_importer"
+
+# Revision A workaround: the panel stays black after the kernel takes over the
+# display. panel-kick re-initialises the display before EmulationStation starts
+# and exits at once on revision B. See docs/KNOWN-ISSUES.md.
+# NGP45HT: not installed. It has no revision-A blank-panel bug, and panel-kick's
+# is_rev_a() test (no husb311 on i2c) is true of every device without a Type-C
+# controller, so on NGP45HT it would blank and restore the display for nothing.
+if [ "$UNIT" == "rg52mini" ]; then
+  sudo install -m 755 scripts/rk3562/panel-kick.sh Arkbuild/usr/local/bin/panel-kick.sh
+  sudo install -m 644 scripts/rk3562/panel-kick.service Arkbuild/etc/systemd/system/panel-kick.service
+  sudo chroot Arkbuild/ bash -c "systemctl enable panel-kick"
+fi
+
+# PortMaster does not know this joystick, so its get_controls() exports the
+# whole gamecontrollerdb.txt (~470 KB) as SDL_GAMECONTROLLERCONFIG, past the
+# kernel's 128 KB limit, and every port fails with "Argument list too long".
+# portmaster-e2big appends PortMaster's own EmuELEC guard to mod_dArkOS.txt,
+# at boot and again whenever a PortMaster update rewrites it.
+sudo install -m 755 scripts/rk3562/portmaster-e2big.sh Arkbuild/usr/local/bin/portmaster-e2big.sh
+sudo install -m 644 scripts/rk3562/portmaster-e2big.service Arkbuild/etc/systemd/system/portmaster-e2big.service
+sudo install -m 644 scripts/rk3562/portmaster-e2big.path Arkbuild/etc/systemd/system/portmaster-e2big.path
+sudo chroot Arkbuild/ bash -c "systemctl enable portmaster-e2big.service portmaster-e2big.path"
 
 # Block udev SDIO-vendor auto-modprobe of aic8800 -- it races the rk915
 # retry loop's rockchip_wifi_power() cycles and stomps aic8800's firmware
@@ -256,6 +538,28 @@ sudo chmod -R 777 Arkbuild/opt/system/
 # Copy performance scripts
 sudo cp scripts/perf* Arkbuild/usr/local/bin/
 
+# Ports: PortMaster ports as ark, scripts written for root-only systems as
+# root (see the script)
+sudo install -m 755 scripts/rk3562/runport.sh Arkbuild/usr/local/bin/runport.sh
+
+# Over-the-air updates (docs/OTA.md): darkos-ota and Options -> Update in place
+# of the generic Update.sh, which fetches upstream updates built for other
+# chipsets
+if [ "$UNIT" == "rg52mini" ] || [ "$UNIT" == "ngp45ht" ]; then
+  sudo install -m 755 scripts/rk3562/darkos-ota Arkbuild/usr/local/sbin/darkos-ota
+  sudo install -m 644 scripts/rk3562/darkos-ota-boot.service Arkbuild/etc/systemd/system/darkos-ota-boot.service
+  sudo chroot Arkbuild/ bash -c "systemctl enable darkos-ota-boot"
+  sudo install -m 755 dArkOS_Tools/rk3562/Update.sh Arkbuild/opt/system/Update.sh
+fi
+
+# NGP45HT: panel colour/temperature port (from ROCKNIX paneladj) and the CJK
+# console font its Chinese dialog needs. Self-contained installer; on a card
+# the same files ship as the ngp45ht-update package.
+if [ "$UNIT" == "ngp45ht" ]; then
+  bash ngp45ht/tools/ngp-panel/install.sh Arkbuild
+  sudo chroot Arkbuild/ bash -c "systemctl enable ngp-panel-restore" || true
+fi
+
 # Add preservation of SDL_VIDEO_EGL_DRIVER to sudoers
 cat <<EOF | sudo tee Arkbuild/etc/sudoers.d/ark_preserve_sdl_video_egl_driver
 Defaults        env_keep += "SDL_VIDEO_EGL_DRIVER"
@@ -270,6 +574,19 @@ sudo chroot Arkbuild/ bash -c "(crontab -l 2>/dev/null; echo \"@reboot /usr/loca
 # DMA heap permissions — Mali EGL needs access as non-root user
 echo -e "Generating 99-dma-heap.rules udev for Mali GPU access"
 echo 'SUBSYSTEM=="dma_heap", MODE="0666"' | sudo tee Arkbuild/etc/udev/rules.d/99-dma-heap.rules
+
+# The GPU's 1000 MHz step is the overclock one (perfoc, the "overclock"
+# governor in ES), but devfreq has no turbo flag and allows its top step from
+# the start: cap it at 900 MHz as soon as the device appears, so that a chip
+# that does not take 1000 MHz is never sent there outside that mode, not even
+# under the boot animation. The CPU's 2208 MHz step is turbo-mode and stays
+# off until perfoc turns boost on.
+echo 'ACTION=="add", SUBSYSTEM=="devfreq", KERNEL=="*.gpu", ATTR{max_freq}="900000000"' | sudo tee Arkbuild/etc/udev/rules.d/99-gpu-oc-cap.rules
+
+# The last brightness other than 0: what the power key puts back after the
+# "black" screensaver of ES turned the backlight off (scripts/pause.sh,
+# Emulationstation/scripts.rk3562).
+echo 'SUBSYSTEM=="backlight", ACTION=="add|change", ATTR{brightness}!="0", RUN+="/bin/sh -c '\''echo $attr{brightness} > /run/darkos-brightness'\''"' | sudo tee Arkbuild/etc/udev/rules.d/99-darkos-brightness.rules
 
 # Joystick button swap persistence -- restore swap state on boot if flag file exists
 echo 'ACTION=="add", SUBSYSTEM=="platform", DRIVER=="rk3562-joystick", RUN+="/bin/sh -c '\''test -f /home/ark/.config/.SWAP_START_HOME && echo 1 > /sys%p/swap_start_home'\''"' | sudo tee Arkbuild/etc/udev/rules.d/99-joystick-swap.rules
@@ -385,8 +702,8 @@ sudo rm -rf Arkbuild/etc/emulationstation/themes/
 sudo chroot Arkbuild/ bash -c "ln -sfv /roms/themes/ /etc/emulationstation/themes"
 
 # Link music folder to /roms/bgmusic
-sudo rm -rf Arkbuild/etc/emulationstation/music/
-sudo chroot Arkbuild/ bash -c "ln -sfv /roms/bgmusic/ /etc/emulationstation/music"
+sudo rm -rf Arkbuild/home/ark/.emulationstation/music
+sudo chroot Arkbuild/ bash -c "ln -sfv /roms/bgmusic/ /home/ark/.emulationstation/music"
 
 # Set launchimage to PIC mode
 sudo chroot Arkbuild/ touch /home/ark/.config/.GameLoadingIModePIC
@@ -424,6 +741,13 @@ cat <<EOF | sudo tee -a Arkbuild/etc/samba/smb.conf
    map hidden = no
    guest ok = yes
    read list = guest
+   # On a dual-boot card /roms is Android's ext4: create what comes in over
+   # the network rwx for user and group, so that ports run (no execute bit
+   # otherwise) and Android keeps group write. FAT/exFAT ignore modes.
+   create mask = 0777
+   force create mode = 0770
+   directory mask = 0777
+   force directory mode = 0770
 
 [opt]
    comment = OPT
@@ -452,9 +776,36 @@ sudo chroot Arkbuild/ bash -c "systemctl disable nmbd" 2>/dev/null || true
 
 # Set distro identification and version
 sudo mkdir -p Arkbuild/usr/share/plymouth/themes/
-cat <<EOF | sudo tee Arkbuild/usr/share/plymouth/themes/text.plymouth
-title=dArkOS (${BUILD_DATE})
+DARKOS_VERSION=${DARKOS_VERSION:-$(cat VERSION 2>/dev/null)}
+if [ "$UNIT" == "rg52mini" ] && [ -n "$DARKOS_VERSION" ]; then
+  DARKOS_TITLE="dArkOS ${DARKOS_VERSION} (${BUILD_DATE})"
+  echo "${DARKOS_VERSION}" | sudo tee Arkbuild/home/ark/.config/.DARKOS_RELEASE
+  # what darkos-ota updates from: a package applies to one BUILD_ID only
+  cat <<EOF | sudo tee Arkbuild/etc/darkos-release
+DEVICE=rg52mini
+VERSION=${DARKOS_VERSION}
+BUILD_ID=${DARKOS_BUILD_ID:-$(date -u +%Y%m%d%H%M%S)}
+BUILD_DATE=${BUILD_DATE}
 EOF
+elif [ "$UNIT" == "ngp45ht" ] && [ -n "$DARKOS_VERSION" ]; then
+  # NGP45HT keeps the date-based image name (setup_partition) but gets the OTA
+  # metadata; its feed is ota/ngp45ht.json in this repo.
+  DARKOS_TITLE="dArkOS ${DARKOS_VERSION} (${BUILD_DATE})"
+  echo "${DARKOS_VERSION}" | sudo tee Arkbuild/home/ark/.config/.DARKOS_RELEASE
+  cat <<EOF | sudo tee Arkbuild/etc/darkos-release
+DEVICE=ngp45ht
+VERSION=${DARKOS_VERSION}
+BUILD_ID=${DARKOS_BUILD_ID:-$(date -u +%Y%m%d%H%M%S)}
+BUILD_DATE=${BUILD_DATE}
+EOF
+else
+  DARKOS_TITLE="dArkOS (${BUILD_DATE})"
+fi
+cat <<EOF | sudo tee Arkbuild/usr/share/plymouth/themes/text.plymouth
+title=${DARKOS_TITLE}
+EOF
+# the date, as ArkOS tools have always compared it; the release is in
+# .DARKOS_RELEASE
 echo "${BUILD_DATE}" | sudo tee Arkbuild/home/ark/.config/.VERSION
 
 # Set boot up welcome text
@@ -513,6 +864,10 @@ done
 # without having to launch a game first to trigger the launcher's mkdir -p.
 sudo mkdir -p ${fat32_mountpoint}/ps2/bios
 sudo mkdir -p ${fat32_mountpoint}/ps2/memcards
+
+# Default shutdown image, shown by finish.sh and pause.sh (upstream 2da67a0);
+# game_systems.txt has already created the folder.
+sudo cp shutdownimages/bye.gif ${fat32_mountpoint}/shutdownimages/
 sudo mkdir -p ${fat32_mountpoint}/ps2/savestates
 
 # Add latest version of PortMaster install to roms/tools folder
@@ -584,3 +939,7 @@ sync
 sudo rm -rf ${fat32_mountpoint}
 
 echo "Finishing touches complete for RK3562"
+
+# Report what did not make it into the image, while Arkbuild is still mounted
+# and before cleanup_filesystem.sh removes the sources. Informational only.
+bash scripts/audit-components.sh Arkbuild build.log

@@ -13,6 +13,22 @@ sudo rm -rf Arkbuild/usr/local/include/SDL/
 if [[ "$BUILD_RKMPP_FFMPEG" == "y" ]]; then
   call_chroot "apt-mark hold ffmpeg"
 fi
+
+# Debian's security updates. The packages come from trixie as of its last point
+# release, and what came out since is in trixie-security and trixie-updates:
+# without them the image lacked fixes to openssl, libpng and others, and apt on
+# the device could not get them either. After the hold above, so our ffmpeg
+# stays; the build's own configuration files are kept.
+if ! grep -q " ${DEBIAN_CODE_NAME}-security " Arkbuild/etc/apt/sources.list; then
+  echo "deb http://security.debian.org/debian-security ${DEBIAN_CODE_NAME}-security main contrib non-free non-free-firmware" | sudo tee -a Arkbuild/etc/apt/sources.list
+fi
+if ! grep -q " ${DEBIAN_CODE_NAME}-updates " Arkbuild/etc/apt/sources.list; then
+  echo "deb http://deb.debian.org/debian ${DEBIAN_CODE_NAME}-updates main contrib non-free non-free-firmware" | sudo tee -a Arkbuild/etc/apt/sources.list
+fi
+if ! call_chroot "eatmydata apt-get -y update && DEBIAN_FRONTEND=noninteractive eatmydata apt-get -y \
+    -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade"; then
+  echo "WARNING: the Debian security updates were not installed; the image has the packages of the point release"
+fi
 call_chroot "apt remove -y autotools-dev \
   build-essential \
   ccache \
@@ -189,7 +205,7 @@ call_chroot "ln -sfv /usr/lib/aarch64-linux-gnu/bin/sdl2-config /usr/bin/sdl2-co
 # Ensure sdl-image is symlinked properly
 call_chroot "rm /lib/libSDL_image-1.2.so.0"
 call_chroot "cd /lib && ln -sf $(find /lib/ -name libSDL_image-1.2.so.0.* | head -n 1) /lib/libSDL_image-1.2.so.0"
-call_chroot "ldconfig"
+call_chroot "ldconfig -X"
 
 # Re-create Mali symlinks for 32-bit armhf AFTER ldconfig, which regenerates versioned
 # symlinks from any Mesa .so files that were pulled in as apt dependencies.

@@ -1,0 +1,623 @@
+From: dArkOS RG52 Mini port
+Subject: Upstream RetroArch security and crash fixes after v1.22.2
+
+v1.22.2 is the newest release; these are taken from master, file by file,
+and merged into one patch whose context is v1.22.2 with our patches 0000-0021
+(the build applies patches with patch -Np1, default fuzz).
+
+Security - data from the network or from downloaded files:
+- 3a52bc6e39 task_decompress: reject archive members with "..", absolute or
+  empty names (Zip Slip). The online updater fetches archives over plain
+  http, so anyone on the same network could write files as ark.
+- 1235db3bd5, 8b1e35a322 archive_file_zlib: ZIP central directory and local
+  header offsets bounded by the archive's size.
+- 91eba66b26, eadcf9e49f rmsgpack: binary and string lengths in .rdb
+  databases (the updater downloads them) no longer overflow.
+- fd69102744 net_http_parse: stack overflow parsing the buildbot index page
+  (net_http_parse.c only).
+- 7335b37dc7 cheevos_client.c: the badge name from the server no longer goes
+  into a file path unchecked; audio_mixer.c: no stack overflow on
+  multichannel FLAC (those two files only).
+- 7a39d86aa4 netplay: bound the savestate size a peer can ask for.
+
+Crashes:
+- e03f25c569 runloop: menu handle used after a reinit freed it.
+- 4e29789925 core updater: task state used after it was freed.
+- ff00d957cc, 31103bbd5c cheat manager: double frees.
+
+diff --git a/cheat_manager.c b/cheat_manager.c
+index 194c2bebcb..cdd2396ce1 100644
+--- a/cheat_manager.c
++++ b/cheat_manager.c
+@@ -280,12 +280,54 @@ bool cheat_manager_copy_idx_to_working(unsigned idx)
+ bool cheat_manager_copy_working_to_idx(unsigned idx)
+ {
+    cheat_manager_t *cheat_st   = &cheat_manager_state;
++   char *saved_desc;
++   char *saved_code;
+    if (!cheat_st->cheats || (cheat_st->size < idx + 1))
+       return false;
+ 
++   /* Save cheats[idx]'s own desc/code pointers BEFORE the memcpy
++    * overwrites them with working_cheat's aliases.
++    *
++    * working_cheat.desc / .code hold stale or aliased pointers:
++    * cheat_manager_copy_idx_to_working does a shallow memcpy
++    * from cheats[src] into working_cheat that copies the pointer
++    * values without strdup'ing the strings.  After that,
++    * working_cheat.desc == cheats[src].desc (aliased), or if
++    * cheats[src].desc has since been freed / reassigned (e.g. by
++    * the user deleting a cheat, adding a new one at the same idx,
++    * or by a previous call to this function), working_cheat.desc
++    * dangles.
++    *
++    * The pre-patch code did
++    *
++    *     memcpy(&cheats[idx], &working_cheat, ...);
++    *     if (cheats[idx].desc) free(cheats[idx].desc);
++    *     cheats[idx].desc = strdup(working_desc);
++    *
++    * which freed cheats[idx].desc via the just-memcpy'd pointer.
++    * If that pointer aliased working_cheat.desc, we lost track of
++    * the original cheats[idx] string (memory leak).  Worse, when
++    * the user cancelled a cheat edit via menu_cbs_cancel.c:99's
++    * cheat_manager_copy_working_to_idx(working_cheat.idx) path
++    * after a prior add/delete churn, the dangling working_cheat.
++    * desc would be copied into cheats[idx] and then free()'d,
++    * producing a double-free or a free of freed memory.
++    *
++    * Fix: save cheats[idx]'s current desc/code pointers, do the
++    * memcpy for the scalar fields, restore the saved desc/code,
++    * then free them and reassign from the scratch buffers.  This
++    * keeps ownership local to cheats[idx] across the whole
++    * function regardless of what working_cheat's desc/code
++    * happen to point at. */
++   saved_desc = cheat_st->cheats[idx].desc;
++   saved_code = cheat_st->cheats[idx].code;
++
+    memcpy(&cheat_st->cheats[idx], &cheat_st->working_cheat,
+          sizeof(struct item_cheat));
+ 
++   cheat_st->cheats[idx].desc = saved_desc;
++   cheat_st->cheats[idx].code = saved_code;
++
+    if (cheat_st->cheats[idx].desc)
+       free(cheat_st->cheats[idx].desc);
+ 
+@@ -561,9 +603,12 @@ bool cheat_manager_realloc(unsigned new_size, unsigned default_handler)
+          cheat_st->cheats[i].desc = NULL;
+       }
+ 
+-      val = (struct item_cheat*)
+-            realloc(cheat_st->cheats,
+-            new_size * sizeof(struct item_cheat));
++      if (new_size != 0)
++      {
++         val = (struct item_cheat*)
++               realloc(cheat_st->cheats,
++               new_size * sizeof(struct item_cheat));
++      }
+ 
+       cheat_st->cheats = val ? val : NULL;
+    }
+diff --git a/cheevos/cheevos_client.c b/cheevos/cheevos_client.c
+index d9aa337569..77cb564d4b 100644
+--- a/cheevos/cheevos_client.c
++++ b/cheevos/cheevos_client.c
+@@ -289,13 +289,28 @@ void rcheevos_client_http_load_response(const rc_api_request_t* request,
+    rc_client_server_callback_t callback, void* callback_data)
+ {
+    char* contents;
++   long  ftell_ret;
+    size_t _len = 0;
+    FILE* file  = fopen(CHEEVOS_JSON_OVERRIDE, "rb");
+ 
+    fseek(file, 0, SEEK_END);
+-   _len = ftell(file);
++   ftell_ret = ftell(file);
+    fseek(file, 0, SEEK_SET);
+ 
++   /* ftell can return -1 on stream error.  Pre-patch _len was
++    * declared size_t and assigned directly from ftell, so a
++    * negative return became (size_t)-1 == SIZE_MAX, malloc
++    * (SIZE_MAX + 1) wrapped to malloc(0) returning a tiny
++    * non-NULL block, and the subsequent contents[_len] = 0
++    * write at offset SIZE_MAX corrupted the heap. */
++   if (ftell_ret < 0)
++   {
++      fclose(file);
++      callback(NULL, 0, callback_data);
++      return;
++   }
++   _len = (size_t)ftell_ret;
++
+    contents = (char*)malloc(_len + 1);
+    fread((void*)contents, 1, _len, file);
+    fclose(file);
+@@ -444,6 +459,39 @@ bool rcheevos_client_download_badge(rc_client_download_queue_t* queue,
+    fill_pathname_slash(badge_fullpath, sizeof(badge_fullpath));
+    badge_fullname      = badge_fullpath + strlen(badge_fullpath);
+    badge_fullname_size = sizeof(badge_fullpath) - (badge_fullname - badge_fullpath);
++
++   /* badge_name is supplied by the achievement server (or, on a
++    * compromised TLS path, an attacker-controlled MITM).
++    * fill_pathname_slash ensures we are anchored under the
++    * badges directory, but if badge_name contains '..', '/', '\\'
++    * or other path-component separators the resulting filesystem
++    * write escapes that directory.  Validate that badge_name is
++    * a single safe filename component (alphanumerics plus '_' and
++    * '-' suffixed by '_lock' on the lock variant); the underscore
++    * is enough because real badge names from the server are
++    * numeric IDs ("12345") or numeric IDs with a "_lock" suffix.
++    * Reject anything else rather than synthesising a sanitised
++    * version, since a bogus badge name from the server is itself
++    * a signal that something is wrong. */
++   {
++      const char *p;
++      bool        ok = (badge_name && *badge_name);
++      for (p = badge_name; ok && *p; p++)
++      {
++         char c = *p;
++         if (!(   (c >= '0' && c <= '9')
++               || (c >= 'a' && c <= 'z')
++               || (c >= 'A' && c <= 'Z')
++               || c == '_' || c == '-'))
++            ok = false;
++      }
++      if (!ok)
++      {
++         CHEEVOS_LOG(RCHEEVOS_TAG "Rejecting badge with unsafe name.\n");
++         return false;
++      }
++   }
++
+    snprintf(badge_fullname, badge_fullname_size, "%s" FILE_PATH_PNG_EXTENSION, badge_name);
+ 
+    if (path_is_valid(badge_fullpath))
+diff --git a/libretro-common/audio/audio_mixer.c b/libretro-common/audio/audio_mixer.c
+index e490052fd1..59812a37cd 100644
+--- a/libretro-common/audio/audio_mixer.c
++++ b/libretro-common/audio/audio_mixer.c
+@@ -723,6 +723,25 @@ static bool audio_mixer_play_flac(
+ 
+    if (!dr_flac)
+       return false;
++
++   /* The downstream mixer (audio_mixer_mix_flac) requests
++    * AUDIO_MIXER_TEMP_BUFFER / 2 frames into a stack buffer
++    * sized AUDIO_MIXER_TEMP_BUFFER floats.  drflac writes
++    * frame_count * channel_count floats, so this only fits
++    * exactly for stereo.  Mono fits but the downstream
++    * accounting is wrong (per existing comment); >2 channels
++    * overflows the stack buffer (e.g. 8-channel FLAC writes
++    * 4 * AUDIO_MIXER_TEMP_BUFFER floats = 4x the buffer).
++    * Reject anything that isn't stereo here rather than risk a
++    * stack overflow during mix.  Mono should be fixed
++    * separately by adjusting the mixer's per-channel
++    * accounting. */
++   if (dr_flac->channels != 2)
++   {
++      drflac_close(dr_flac);
++      return false;
++   }
++
+    if (dr_flac->sampleRate != s_rate)
+    {
+       ratio = (double)s_rate / (double)(dr_flac->sampleRate);
+diff --git a/libretro-common/file/archive_file_zlib.c b/libretro-common/file/archive_file_zlib.c
+index 68062fd355..1241d846b8 100644
+--- a/libretro-common/file/archive_file_zlib.c
++++ b/libretro-common/file/archive_file_zlib.c
+@@ -112,7 +112,19 @@ static bool zlib_stream_decompress_data_to_file_init(
+    /* seek past most of the local directory header */
+ #ifdef HAVE_MMAP
+    if (state->archive_mmap_data)
++   {
++      /* cdata is a file offset taken from the central directory and is
++       * not otherwise validated, so bound the 30-byte local header
++       * (26 skipped + 4 read here) against the mapping before reading
++       * it - a crafted offset near the end of the archive would
++       * otherwise read past the mmap. */
++      if ((int64_t)(size_t)cdata + 26 + 4 > state->archive_size)
++      {
++         zip_context_free_stream(zip_context, false);
++         return false;
++      }
+       local_header = state->archive_mmap_data + (size_t)cdata + 26;
++   }
+    else
+ #endif
+    {
+@@ -129,6 +141,23 @@ static bool zlib_stream_decompress_data_to_file_init(
+    offsetEL = read_le(local_header + 2, 2); /* extra field length */
+    offsetData = (int64_t)(size_t)cdata + 26 + 4 + offsetNL + offsetEL;
+ 
++   /* offsetData and the member sizes come from the archive and drive
++    * the mmap reads in the iterate step below (memcpy of usize bytes
++    * for STORED, csize-bounded chunks for DEFLATED).  Reject a member
++    * whose data would extend past the mapping now, rather than reading
++    * out of bounds later.  The non-mmap path is naturally bounded - a
++    * seek past EOF followed by a read simply returns short - so this
++    * only needs to hold for the mapped case, but checking it always is
++    * harmless and keeps the two paths consistent. */
++   if (       offsetData < 0
++         ||   offsetData          > state->archive_size
++         || (int64_t)size         > state->archive_size - offsetData
++         || (int64_t)csize        > state->archive_size - offsetData)
++   {
++      zip_context_free_stream(zip_context, false);
++      return false;
++   }
++
+    zip_context->fdoffset              = offsetData;
+    zip_context->usize                 = size;
+    zip_context->csize                 = csize;
+@@ -302,7 +331,14 @@ static int zip_file_decompressed(
+       uint32_t crc32, struct archive_extract_userdata *userdata)
+ {
+    decomp_state_t* decomp_state = (decomp_state_t*)userdata->cb_data;
+-   char last_char = name[strlen(name) - 1];
++   size_t name_len              = name ? strlen(name) : 0;
++   char last_char;
++   /* Reject empty or NULL name -- strlen-1 on empty would read
++    * name[SIZE_MAX].  Malformed archives can have 0-length filename
++    * entries. */
++   if (name_len == 0)
++      return 1;
++   last_char = name[name_len - 1];
+    /* Ignore directories. */
+    if (last_char == '/' || last_char == '\\')
+       return 1;
+@@ -481,6 +517,12 @@ static int zip_parse_file_iterate_step_internal(
+    if (entry < zip_context->directory || entry >= zip_context->directory_end)
+       return 0;
+ 
++   /* Central-directory fixed header is 46 bytes (highest-offset read
++    * is at +42..+45).  Reject a truncated trailing entry before any
++    * out-of-bounds read. */
++   if ((size_t)(zip_context->directory_end - entry) < 46)
++      return -1;
++
+    signature = read_le(zip_context->directory_entry + 0, 4);
+ 
+    if (signature != CENTRAL_FILE_HEADER_SIGNATURE)
+@@ -498,6 +540,13 @@ static int zip_parse_file_iterate_step_internal(
+    if (namelength >= PATH_MAX_LENGTH)
+       return -1;
+ 
++   /* Variable-length fields (name, extra, comment) follow the 46-byte
++    * fixed header.  Reject if the declared sizes would run past the
++    * end of the directory block. */
++   if ((size_t)(zip_context->directory_end - entry)
++         < (size_t)46 + namelength + extralength + commentlength)
++      return -1;
++
+    memcpy(filename, zip_context->directory_entry + 46, namelength); /* file name */
+    filename[namelength] = '\0';
+ 
+diff --git a/libretro-common/net/net_http_parse.c b/libretro-common/net/net_http_parse.c
+index 7f2914c979..3463a7d767 100644
+--- a/libretro-common/net/net_http_parse.c
++++ b/libretro-common/net/net_http_parse.c
+@@ -58,13 +58,20 @@ int string_parse_html_anchor(const char *line, char *link, char *name,
+       if (!*link)
+       {
+          const char *end = strstr(line, "\"");
++         size_t _len;
+ 
+          if (!end)
+             return 1;
+ 
+-         memcpy(link, line, end - line);
++         /* Bound the href length against the caller's buffer.
++          * Pre-patch the memcpy was unbounded and a long href
++          * would overflow link[].  Keep room for the NUL. */
++         _len = (size_t)(end - line);
++         if (_len >= link_size)
++            _len = (link_size > 0) ? link_size - 1 : 0;
+ 
+-         *(link + (end - line)) = '\0';
++         memcpy(link, line, _len);
++         link[_len] = '\0';
+          line += end - line;
+       }
+ 
+@@ -72,13 +79,18 @@ int string_parse_html_anchor(const char *line, char *link, char *name,
+       {
+          const char *start = strstr(line, "\">");
+          const char *end   = start ? strstr(start, "</a>") : NULL;
++         size_t _len;
+ 
+          if (!start || !end)
+             return 1;
+ 
+-         memcpy(name, start + 2, end - start - 2);
++         /* Same bounding for the anchor text. */
++         _len = (size_t)(end - start - 2);
++         if (_len >= name_size)
++            _len = (name_size > 0) ? name_size - 1 : 0;
+ 
+-         *(name + (end - start - 2)) = '\0';
++         memcpy(name, start + 2, _len);
++         name[_len] = '\0';
+       }
+    }
+ 
+diff --git a/libretro-db/rmsgpack_dom.c b/libretro-db/rmsgpack_dom.c
+index 316c47cf9c..14703c762e 100644
+--- a/libretro-db/rmsgpack_dom.c
++++ b/libretro-db/rmsgpack_dom.c
+@@ -506,17 +506,26 @@ int rmsgpack_dom_read_into(intfstream_t *fd, ...)
+             case RDT_BINARY:
+                buff_value     = va_arg(ap, char *);
+                uint_value     = va_arg(ap, uint64_t *);
+-               *uint_value    = value->val.binary.len;
++               /* *uint_value is the caller's buffer capacity on entry
++                * and the number of bytes copied on exit.  Compute the
++                * clamped copy length BEFORE overwriting *uint_value,
++                * otherwise the bound check collapses to len > len and
++                * the memcpy can overrun the caller's buffer with
++                * attacker-controlled length from the db file. */
+                min_len        = (value->val.binary.len > *uint_value) ?
+                   *uint_value : value->val.binary.len;
++               *uint_value    = min_len;
+ 
+                memcpy(buff_value, value->val.binary.buff, (size_t)min_len);
+                break;
+             case RDT_STRING:
+                buff_value     = va_arg(ap, char *);
+                uint_value     = va_arg(ap, uint64_t *);
+-               min_len        = (value->val.string.len + 1 > *uint_value) ?
+-                  *uint_value : value->val.string.len + 1;
++               /* Cast to uint64_t before adding 1 to avoid uint32_t
++                * overflow when string.len == UINT32_MAX, which would
++                * wrap the sum to 0 and collapse the bounds check. */
++               min_len        = ((uint64_t)value->val.string.len + 1 > *uint_value) ?
++                  *uint_value : (uint64_t)value->val.string.len + 1;
+                *uint_value    = min_len;
+ 
+                memcpy(buff_value, value->val.string.buff, (size_t)min_len);
+diff --git a/network/netplay/netplay_frontend.c b/network/netplay/netplay_frontend.c
+index 6e7042cb90..11070f84f2 100644
+--- a/network/netplay/netplay_frontend.c
++++ b/network/netplay/netplay_frontend.c
+@@ -6085,7 +6085,12 @@ static bool netplay_get_cmd(netplay_t *netplay,
+             state_size     = ntohl(state_size);
+             state_size_raw = cmd_size - (sizeof(frame) + sizeof(state_size));
+ 
+-            if (state_size_raw > netplay->zbuffer_size)
++            /* state_size is supplied by the peer and controls every
++             * rollback buffer below. Bound both decompressed output and
++             * compressed input to the fixed per-session buffer limit,
++             * derived from our local state size, before resizing anything. */
++            if (   (size_t)state_size > netplay->zbuffer_size
++                || state_size_raw > netplay->zbuffer_size)
+             {
+                RARCH_ERR("[Netplay] Netplay state load with an unexpected save state size.\n");
+                return netplay_cmd_nak(netplay, connection);
+diff --git a/runloop.c b/runloop.c
+index 679517b280..d7a257aeab 100644
+--- a/runloop.c
++++ b/runloop.c
+@@ -6315,10 +6315,18 @@ static enum runloop_state_enum runloop_check_state(
+                         libretro_running, current_time))
+                   video_driver_cached_frame();
+ 
+-            if (menu->driver_ctx->set_texture)
+-               menu->driver_ctx->set_texture(menu->userdata);
++            /* Core execution inside display_menu_libretro() can trigger
++             * a driver reinit (e.g. RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO
++             * -> CMD_EVENT_REINIT), which frees and recreates the menu
++             * handle - the cached pointer must be re-fetched before it
++             * is dereferenced again */
++            if ((menu = menu_st->driver_data))
++            {
++               if (menu->driver_ctx && menu->driver_ctx->set_texture)
++                  menu->driver_ctx->set_texture(menu->userdata);
+ 
+-            menu->state               = 0;
++               menu->state            = 0;
++            }
+          }
+ 
+          if (settings->bools.audio_enable_menu && !libretro_running)
+diff --git a/tasks/task_core_updater.c b/tasks/task_core_updater.c
+index 1533537f71..7bfebaf7cd 100644
+--- a/tasks/task_core_updater.c
++++ b/tasks/task_core_updater.c
+@@ -406,7 +406,19 @@ static void task_core_updater_get_list_handler(retro_task_t *task)
+ 
+ task_finished:
+    if (task)
++   {
++      /* Clear the state pointer before the handle is freed.  The
++       * worker runs handlers with running_lock released and the task
++       * still linked into tasks_running, so a task that has finished
++       * here stays visible to retro_task_threaded_find() until the
++       * worker retires it.  The finders in this file dereference
++       * task->state, so leaving it pointing at freed memory is a
++       * use-after-free - task_core_updater_download_finder() strcmps
++       * through it, which is a hard crash the moment
++       * task_update_installed_cores_handler() pushes the next core. */
++      task->state = NULL;
+       task_set_flags(task, RETRO_TASK_FLG_FINISHED, true);
++   }
+ 
+    if (list_handle)
+       free_core_updater_list_handle(list_handle);
+@@ -629,13 +641,17 @@ finish:
+    {
+       RARCH_ERR("[Core Updater] Download of \"%s\" failed: %s.\n",
+             (transf ? transf->path: "unknown"), err);
+-      download_handle->status = CORE_UPDATER_DOWNLOAD_ERROR;
++      /* download_handle is still NULL on the early bail-outs above
++       * (no data, no transfer, no user_data), so it cannot be
++       * dereferenced unconditionally here. */
++      if (download_handle)
++         download_handle->status = CORE_UPDATER_DOWNLOAD_ERROR;
+    }
+    if (transf)
+       free(transf);
+ 
+    /* if no decompress task was queued, mark it as completed */
+-   if (!download_handle->decompress_task)
++   if (download_handle && !download_handle->decompress_task)
+       download_handle->decompress_task_complete = true;
+ }
+ 
+@@ -980,7 +996,19 @@ static void task_core_updater_download_handler(retro_task_t *task)
+ 
+ task_finished:
+    if (task)
++   {
++      /* Clear the state pointer before the handle is freed.  The
++       * worker runs handlers with running_lock released and the task
++       * still linked into tasks_running, so a task that has finished
++       * here stays visible to retro_task_threaded_find() until the
++       * worker retires it.  The finders in this file dereference
++       * task->state, so leaving it pointing at freed memory is a
++       * use-after-free - task_core_updater_download_finder() strcmps
++       * through it, which is a hard crash the moment
++       * task_update_installed_cores_handler() pushes the next core. */
++      task->state = NULL;
+       task_set_flags(task, RETRO_TASK_FLG_FINISHED, true);
++   }
+ 
+    if (download_handle)
+       free_core_updater_download_handle(download_handle);
+@@ -1473,7 +1501,19 @@ static void task_update_installed_cores_handler(retro_task_t *task)
+ 
+ task_finished:
+    if (task)
++   {
++      /* Clear the state pointer before the handle is freed.  The
++       * worker runs handlers with running_lock released and the task
++       * still linked into tasks_running, so a task that has finished
++       * here stays visible to retro_task_threaded_find() until the
++       * worker retires it.  The finders in this file dereference
++       * task->state, so leaving it pointing at freed memory is a
++       * use-after-free - task_core_updater_download_finder() strcmps
++       * through it, which is a hard crash the moment
++       * task_update_installed_cores_handler() pushes the next core. */
++      task->state = NULL;
+       task_set_flags(task, RETRO_TASK_FLG_FINISHED, true);
++   }
+ 
+    if (update_installed_handle)
+       free_update_installed_cores_handle(update_installed_handle);
+@@ -1795,7 +1835,19 @@ static void task_play_feature_delivery_core_install_handler(
+ 
+ task_finished:
+    if (task)
++   {
++      /* Clear the state pointer before the handle is freed.  The
++       * worker runs handlers with running_lock released and the task
++       * still linked into tasks_running, so a task that has finished
++       * here stays visible to retro_task_threaded_find() until the
++       * worker retires it.  The finders in this file dereference
++       * task->state, so leaving it pointing at freed memory is a
++       * use-after-free - task_core_updater_download_finder() strcmps
++       * through it, which is a hard crash the moment
++       * task_update_installed_cores_handler() pushes the next core. */
++      task->state = NULL;
+       task_set_flags(task, RETRO_TASK_FLG_FINISHED, true);
++   }
+ 
+    if (pfd_install_handle)
+       free_play_feature_delivery_install_handle(pfd_install_handle);
+@@ -2178,7 +2230,19 @@ static void task_play_feature_delivery_switch_cores_handler(
+ 
+ task_finished:
+    if (task)
++   {
++      /* Clear the state pointer before the handle is freed.  The
++       * worker runs handlers with running_lock released and the task
++       * still linked into tasks_running, so a task that has finished
++       * here stays visible to retro_task_threaded_find() until the
++       * worker retires it.  The finders in this file dereference
++       * task->state, so leaving it pointing at freed memory is a
++       * use-after-free - task_core_updater_download_finder() strcmps
++       * through it, which is a hard crash the moment
++       * task_update_installed_cores_handler() pushes the next core. */
++      task->state = NULL;
+       task_set_flags(task, RETRO_TASK_FLG_FINISHED, true);
++   }
+ 
+    if (pfd_switch_cores_handle)
+       free_play_feature_delivery_switch_cores_handle(pfd_switch_cores_handle);
+diff --git a/tasks/task_decompress.c b/tasks/task_decompress.c
+index 230ff60fc7..a15898e6d1 100644
+--- a/tasks/task_decompress.c
++++ b/tasks/task_decompress.c
+@@ -34,6 +34,45 @@ static int file_decompressed_target_file(const char *name,
+    return 0;
+ }
+ 
++/* Rejects archive member names that could escape the intended
++ * extraction directory ("Zip Slip"). Returns true if the name is
++ * safe to concatenate onto a target-directory prefix. */
++static bool archive_name_is_safe(const char *name)
++{
++   const char *p;
++   const char *seg_start;
++
++   if (!name || !*name)
++      return false;
++
++   /* Reject absolute paths in either Unix or Windows form. */
++   if (name[0] == '/' || name[0] == '\\')
++      return false;
++   /* Reject drive-letter prefix e.g. "C:..." */
++   if (name[1] == ':')
++      return false;
++
++   /* Reject any ".." path segment.  Treat both '/' and '\\' as
++    * separators so Windows-authored archives can't traverse when
++    * extracted on a POSIX host. */
++   p = seg_start = name;
++   for (;;)
++   {
++      char c = *p;
++      if (c == '/' || c == '\\' || c == '\0')
++      {
++         if ((size_t)(p - seg_start) == 2
++               && seg_start[0] == '.' && seg_start[1] == '.')
++            return false;
++         if (c == '\0')
++            break;
++         seg_start = p + 1;
++      }
++      p++;
++   }
++   return true;
++}
++
+ static int file_decompressed_subdir(const char *name,
+       const char *valid_exts,
+       const uint8_t *cdata,
+@@ -42,7 +81,11 @@ static int file_decompressed_subdir(const char *name,
+ {
+    char path_dir[DIR_MAX_LENGTH];
+    char path[PATH_MAX_LENGTH];
+-   size_t _len        = strlen(name);
++   size_t _len;
++   /* Reject empty names (strlen-1 OOB) and traversal attempts. */
++   if (!archive_name_is_safe(name))
++      return 1;
++   _len = strlen(name);
+    /* Look at last character. Ignore directories, go to next file. */
+    if (name[_len - 1] == '/' || name[_len - 1] == '\\')
+       return 1;
+@@ -82,7 +125,11 @@ static int file_decompressed(const char *name, const char *valid_exts,
+ {
+    char path[PATH_MAX_LENGTH];
+    decompress_state_t *dec = userdata->dec;
+-   size_t _len             = strlen(name);
++   size_t _len;
++   /* Reject empty names (strlen-1 OOB) and traversal attempts. */
++   if (!archive_name_is_safe(name))
++      return 1;
++   _len = strlen(name);
+    /* Look at last character. Ignore directories, go to next file. */
+    if (name[_len - 1] == '/' || name[_len - 1] == '\\')
+       return 1;

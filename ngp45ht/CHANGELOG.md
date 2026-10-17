@@ -1,5 +1,42 @@
 # 更新记录
 
+## 2026-10-17 · 同步上游 v1.1 + 色温移植 + 中文字体
+
+**上游同步**（mamaich/dArkOS_rg52mini v1.1，`ecb0922`）：除 `.gitmodules`/`README.md` 和三个子模块指针
+保留本仓库版本外，其余 135 个变更/新增文件全部合入。与移植冲突 0 处——上游没碰 `ngp45ht/`。
+合入的重点：
+
+- **`perfmax`/`perfnorm` 改为探测 GPU devfreq 节点**（`/sys/class/devfreq/*.gpu`），写死 `fde60000` 的
+  问题上游已修，本机 `ff320000` 直接受益；另引入 `perfoc` 超频开关（本机无 1000 MHz 档，会优雅退出）。
+- **内核模块 `--strip-debug`**：去掉 DWARF 但保留符号表（MODVERSIONS CRC 要靠它），`.ko` 体积约省 97%——
+  p4 只剩 ~224 MB 的情况下这是实质性缓解。
+- **PortMaster E2BIG 修复**（`portmaster-e2big`）：PortMaster 的 `get_controls()` 导出整个
+  gamecontrollerdb 当 `SDL_GAMECONTROLLERCONFIG`，超过内核 128 KB 限制，之前每个端口都死在
+  "Argument list too long"。
+- **睡眠/电源键修复**：systemd sleep hook（`scripts/sleep.rk3562` → `/usr/lib/systemd/system-sleep/sleep`）
+  + `pause.sh` 读 `/run/darkos-sleep.phase` 区分"睡梦中按的键"和"新请求" + ES 的 sleep/wake 脚本 +
+  背光记忆 udev 规则。10-16 黑屏事件的两个候选解释（suspend 卡死 / 背光被调暗）都在这里有了对应物。
+- **根目录归属修复**（`chown root:root Arkbuild/`）：否则 PPSSPP-2021 每次启动都在 `/` 留内存文件。
+- 其余：Wifi.sh 的 rk3562 开关、bttoggle 持久化、bluealsa 条件启用、Bluetooth
+  `ClassicBondedOnly=false`、RetroArch 安全补丁 0021-0023、zram/emmc-swap、runport.sh、
+  wifi_importer、audit-components、shutdown 图、DSperate/vk-rotate-layer/gl4es-fix/OTA 全套。
+- 本仓库定制：**panel-kick 不装到 NGP45HT**（它的 rev-A 判定对没有 husb311 的设备恒真，会白翻一次屏）；
+  **OTA 扩展到 ngp45ht**（`ota/ngp45ht.json` 空 feed 起步，`darkos-ota` 默认 feed 指向本仓库）；
+  `es_systems.cfg.rk3562` 补上卡上已有的 **fbneo** 系统块（现 131 个系统，XML 已验证）。
+
+**屏幕色温/画面调节**（`tools/ngp-panel/`，移植自 ROCKNIX `paneladj`）：VOP2 BCSH 四个连接器属性
+brightness/contrast/saturation/hue（0-100，50 中性，全 50 时驱动旁路）。`panelprop.py` 用 ctypes 直调
+libdrm 写属性，不装 modetest、不用 sudo；值持久化在 `/opt/ngp-panel/panel.conf`（`/opt` 不受 SD-switch
+sed 影响）；`ngp-panel-restore.service` 开机重放（DRM 属性重启即丢）。菜单入口 `/opt/system/屏幕色温.sh`，
+dialog + gptokeyb 手柄可操作，亮度下限 5 防调黑。`install.sh` 镜像/卡片两用，已挂进 finishing_touches。
+
+**中文字体**：`Unifont-CJK-panel.psf.gz`，mkpsf.py 从 GNU Unifont BDF 自建的 512 字形位 PSF2
+（内核 VT 单字体上限 512；PSF1 会被按 8px 宽解释把汉字拉成竖条，必须 PSF2；bdf2psf 因混合宽度会丢汉字，
+故自写转换器）。ES 菜单中文走镜像自带的 DroidSansFallbackFull 回退，改文件名即可。
+
+**收尾的旧账**：`ngp-p1-switch.sh` / `ngp-xpad-build.sh`（外接手柄抢 P1、xpad 构建）提交进 `tools/`；
+`ngp45ht_defconfig` 补上 `CONFIG_JOYSTICK_XPAD=y` + `_FF=y`（2.4G XInput 手柄，下一版镜像生效）。
+
 ## 2026-10-16 · 卡上修正（没有重打镜像）
 
 都落在**现役卡**上，脚本同时进了 `tools/`；下次重建镜像一起带进去。

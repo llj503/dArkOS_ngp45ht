@@ -1,0 +1,27 @@
+From: dArkOS RG52 Mini port
+Subject: Network commands: listen on 127.0.0.1 only
+
+With network_cmd_enable on, RetroArch took commands on UDP port 55355 from
+any host, without authentication: QUIT, LOAD_STATE, WRITE_CORE_RAM and the
+rest. Worse, in v1.22.2 READ_CORE_RAM overflows the heap on a large byte
+count (upstream fa49a43dc2), so one packet from the network could corrupt
+memory of a process running as ark, who has sudo. "Enable Quick Mode"
+turns network commands on, because it closes RetroArch with
+`retroarch --command QUIT`, which sends to localhost.
+
+The command socket now binds to 127.0.0.1: local senders such as Quick
+Mode work as before, and nothing reaches it from the network.
+
+diff --git a/command.c b/command.c
+index 791d510547..bdc26f30d8 100644
+--- a/command.c
++++ b/command.c
+@@ -239,7 +239,7 @@ command_t* command_network_new(uint16_t port)
+    command_t            *cmd = (command_t*)calloc(1, sizeof(*cmd));
+    command_network_t *netcmd = (command_network_t*)calloc(
+                                    1, sizeof(command_network_t));
+-   int fd = socket_init((void**)&res, port, NULL,
++   int fd = socket_init((void**)&res, port, "127.0.0.1",
+          SOCKET_TYPE_DATAGRAM, AF_INET);
+ 
+    RARCH_LOG("[NetCMD] %s %hu.\n",

@@ -131,3 +131,4 @@ x1
 x68000
 zx81
 zxspectrum
+shutdownimages

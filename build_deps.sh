@@ -116,7 +116,7 @@ do
     done
   )
 done
-sudo chroot Arkbuild/ ldconfig
+sudo chroot Arkbuild/ ldconfig -X
 
 # EmulationStation uses the system Mali (g29p1) like every other app — g29p1's
 # GLES 1.0 glDrawArrays works, so the old g24p0+g13p0 dual-blob hack (a separate

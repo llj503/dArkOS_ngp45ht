@@ -1,0 +1,12 @@
+[Unit]
+Description=PortMaster: re-add the E2BIG guard after PortMaster installs or updates
+
+[Path]
+PathChanged=/opt/system/Tools/PortMaster/mod_dArkOS.txt
+PathChanged=/roms/ports/PortMaster/mod_dArkOS.txt
+PathChanged=/roms2/ports/PortMaster/mod_dArkOS.txt
+PathChanged=/roms/tools/PortMaster/mod_dArkOS.txt
+Unit=portmaster-e2big.service
+
+[Install]
+WantedBy=multi-user.target

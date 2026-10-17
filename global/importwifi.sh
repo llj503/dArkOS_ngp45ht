@@ -24,7 +24,18 @@ if [[ -f $(find /opt/system/Tools -maxdepth 1 -iname wifikeyfile.txt) ]]; then
 	  height="20"
 	  width="60"
 	elif [[ -e "/dev/input/by-path/platform-singleadc-joypad-event-joystick" ]]; then
-	  sudo setfont /usr/share/consolefonts/Lat7-Terminus20x10.psf.gz
+	  if test ! -z "$(cat /home/ark/.config/.DEVICE | grep RG503 | tr -d '\0')"
+	  then
+		sudo setfont /usr/share/consolefonts/Lat7-TerminusBold20x10.psf.gz
+	  elif test ! -z "$(cat /home/ark/.config/.DEVICE | grep RGB20PRO | tr -d '\0')"
+	  then
+		sudo setfont /usr/share/consolefonts/Lat7-TerminusBold32x16.psf.gz
+	  elif test ! -z "$(cat /home/ark/.config/.DEVICE | grep MINILOONG | tr -d '\0')"
+	  then
+		sudo setfont /usr/share/consolefonts/Lat7-TerminusBold28x14.psf.gz
+	  else
+		sudo setfont /usr/share/consolefonts/Lat7-TerminusBold22x11.psf.gz
+	  fi
 	  height="20"
 	  width="60"
 	else
@@ -39,11 +50,11 @@ if [[ -f $(find /opt/system/Tools -maxdepth 1 -iname wifikeyfile.txt) ]]; then
 	  exit 0
 	fi
 
-	if [[ -z $(ifconfig | grep wlan0 | tr -d '\0') ]]; then
+	if [[ -z $(iw dev wlan0 info | tr -d '\0') ]]; then
 	  dialog --infobox "Waiting for wifi adapter to be enabled.  Please wait..." 5 $width > /dev/tty1
 	  printf "Waiting for wifi adapter to be enabled.  Please wait..."
 	  sleep 10
-	  if [[ -z $(ifconfig | grep wlan0 | tr -d '\0') ]]; then
+	  if [[ -z $(iw dev wlan0 info | tr -d '\0') ]]; then
 	    dialog --infobox "There isn't a compatible wifi adapter connected.  Please plug in a compatible wifi adapter then reboot so importing of your wifi credentials can be completed." 5 $width > /dev/tty1
 	    sleep 10
 	    exit 0
@@ -52,8 +63,6 @@ if [[ -f $(find /opt/system/Tools -maxdepth 1 -iname wifikeyfile.txt) ]]; then
 
 	dialog --infobox "Starting Wifi importer.  Please wait..." 5 $width > /dev/tty1
 	#printf "Starting Wifi importer.  Please wait..." > /dev/tty1
-	sudo systemctl stop networkwatchdaemon
-	sudo systemctl restart NetworkManager
 
 	dos2unix "$keyfile"
 	mapfile wificreds < "$keyfile"
@@ -90,8 +99,6 @@ if [[ -f $(find /opt/system/Tools -maxdepth 1 -iname wifikeyfile.txt) ]]; then
 	  dialog --infobox "The contents of the ${keyfile_base} are invalid.  It can not be imported.  File has been renamed to ${keyfile}.nogood in the tools folder." $height $width 2>&1 > /dev/tty1 
 	  sleep 10
 	fi
-	sudo systemctl stop NetworkManager
-	sudo systemctl start networkwatchdaemon
 	dialog --clear
 	printf "\033c" > /dev/tty1
 	exit 0

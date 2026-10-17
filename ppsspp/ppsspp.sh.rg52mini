@@ -2,27 +2,38 @@
 
 directory=$(dirname "$2" | cut -d "/" -f2)
 
-ln -sf /$directory/psp/ppsspp/ /home/ark/.config/
+# The codec's playback path before the emulator starts, put back after it
+# exits (see the end of this script).
+playback_path=$(amixer sget 'Playback Path' 2>/dev/null | sed -n "s/.*Item0: '\(.*\)'/\1/p")
+
+# PPSSPP and PPSSPP-2021 keep separate configs (upstream 596c142): both used to
+# write the same ppsspp.ini, and each rewrote it in its own format.
+opt_config_directory_std="/opt/ppsspp/backupforromsfolder/ppsspp"
+opt_config_directory_2021="/opt/ppsspp-2021/backupforromsfolder/ppsspp"
+roms_config_directory_std="/$directory/psp/ppsspp"
+roms_config_directory_2021="/$directory/psp/ppsspp-2021"
 
 # Seed any new per-game configs (e.g. UCUS98653_ppsspp.ini) onto cards that
 # already have a ppsspp folder, without overwriting user-modified ones.
-if [[ -d "/$directory/psp/ppsspp/PSP/SYSTEM" ]]; then
-  for f in /opt/ppsspp/backupforromsfolder/ppsspp/PSP/SYSTEM/*_ppsspp.ini; do
-    if [[ -f "$f" ]] && [[ ! -f "/$directory/psp/ppsspp/PSP/SYSTEM/${f##*/}" ]]; then
-      cp "$f" "/$directory/psp/ppsspp/PSP/SYSTEM/"
+if [[ -d "$roms_config_directory_std/PSP/SYSTEM" ]]; then
+  for f in $opt_config_directory_std/PSP/SYSTEM/*_ppsspp.ini; do
+    if [[ -f "$f" ]] && [[ ! -f "$roms_config_directory_std/PSP/SYSTEM/${f##*/}" ]]; then
+      cp "$f" "$roms_config_directory_std/PSP/SYSTEM/"
     fi
   done
 fi
 
 if  [[ $1 == "standalone" ]]; then
-  if  [[ ! -d "/$directory/psp/ppsspp" ]]; then
-    cp -rf /opt/ppsspp/backupforromsfolder/ppsspp /$directory/psp
+  rm -f /home/ark/.config/ppsspp
+  ln -sf $roms_config_directory_std/ /home/ark/.config/ppsspp
+  if  [[ ! -d "$roms_config_directory_std" ]]; then
+    cp -rf $opt_config_directory_std/ $roms_config_directory_std/
   fi
-  if  [[ ! -f "/$directory/psp/ppsspp/PSP/SYSTEM/controls.ini" ]]; then
-    cp -rf /opt/ppsspp/backupforromsfolder/ppsspp/PSP/SYSTEM/controls.ini /$directory/psp/ppsspp/PSP/SYSTEM/controls.ini
+  if  [[ ! -f "$roms_config_directory_std/PSP/SYSTEM/controls.ini" ]]; then
+    cp -rf $opt_config_directory_std/PSP/SYSTEM/controls.ini $roms_config_directory_std/PSP/SYSTEM/controls.ini
   fi
-  if  [[ ! -f "/$directory/psp/ppsspp/PSP/SYSTEM/ppsspp.ini.sdl" ]]; then
-    cp -rf /opt/ppsspp/backupforromsfolder/ppsspp/PSP/SYSTEM/ppsspp.ini.sdl /$directory/psp/ppsspp/PSP/SYSTEM/ppsspp.ini.sdl
+  if  [[ ! -f "$roms_config_directory_std/PSP/SYSTEM/ppsspp.ini.sdl" ]]; then
+    cp -rf $opt_config_directory_std/PSP/SYSTEM/ppsspp.ini.sdl $roms_config_directory_std/PSP/SYSTEM/ppsspp.ini.sdl
   fi
   echo "VAR=PPSSPPSDL" > /home/ark/.config/KILLIT
   sudo systemctl restart killer_daemon.service
@@ -31,27 +42,32 @@ if  [[ $1 == "standalone" ]]; then
   # PPSSPP before its destructor can unlink the shm, so the next launch sees a
   # stale counter and silently drops all settings changes.  Wipe it pre-launch.
   sudo rm -f /dev/shm/PPSSPP_ID
-  cp -f /$directory/psp/ppsspp/PSP/SYSTEM/ppsspp.ini.sdl /$directory/psp/ppsspp/PSP/SYSTEM/ppsspp.ini
+  cp -f $roms_config_directory_std/PSP/SYSTEM/ppsspp.ini.sdl $roms_config_directory_std/PSP/SYSTEM/ppsspp.ini
   /opt/ppsspp/PPSSPPSDL --xres 1280 --yres 720 "$2"
-  cp -f /$directory/psp/ppsspp/PSP/SYSTEM/ppsspp.ini /$directory/psp/ppsspp/PSP/SYSTEM/ppsspp.ini.sdl
+  cp -f $roms_config_directory_std/PSP/SYSTEM/ppsspp.ini $roms_config_directory_std/PSP/SYSTEM/ppsspp.ini.sdl
   sudo systemctl stop killer_daemon.service
 elif [[ $1 == "standalone-2021" ]]; then
-  if  [[ ! -d "/$directory/psp/ppsspp" ]]; then
-    cp -rf /opt/ppsspp/backupforromsfolder/ppsspp /$directory/psp
+  rm -f /home/ark/.config/ppsspp
+  ln -sf $roms_config_directory_2021/ /home/ark/.config/ppsspp
+  if  [[ ! -d "$roms_config_directory_2021" ]]; then
+    cp -rf $opt_config_directory_2021/ $roms_config_directory_2021/
   fi
-  if  [[ ! -f "/$directory/psp/ppsspp/PSP/SYSTEM/controls.ini" ]]; then
-    cp -rf /opt/ppsspp/backupforromsfolder/ppsspp/PSP/SYSTEM/controls.ini /$directory/psp/ppsspp/PSP/SYSTEM/controls.ini
+  if  [[ ! -f "$roms_config_directory_2021/PSP/SYSTEM/controls.ini" ]]; then
+    cp -rf $opt_config_directory_2021/PSP/SYSTEM/controls.ini $roms_config_directory_2021/PSP/SYSTEM/controls.ini
   fi
-  if  [[ ! -f "/$directory/psp/ppsspp/PSP/SYSTEM/ppsspp.ini.sdl" ]]; then
-    cp -rf /opt/ppsspp/backupforromsfolder/ppsspp/PSP/SYSTEM/ppsspp.ini.sdl /$directory/psp/ppsspp/PSP/SYSTEM/ppsspp.ini.sdl
+  if  [[ ! -f "$roms_config_directory_2021/PSP/SYSTEM/ppsspp.ini.sdl" ]]; then
+    cp -rf $opt_config_directory_2021/PSP/SYSTEM/ppsspp.ini.sdl $roms_config_directory_2021/PSP/SYSTEM/ppsspp.ini.sdl
   fi
   export SDL_AUDIODRIVER=alsa
   echo "VAR=PPSSPPSDL" > /home/ark/.config/KILLIT
   sudo systemctl restart killer_daemon.service
   sudo rm -f /dev/shm/PPSSPP_ID
-  cp -f /$directory/psp/ppsspp/PSP/SYSTEM/ppsspp.ini.sdl /$directory/psp/ppsspp/PSP/SYSTEM/ppsspp.ini
+  # PPSSPP-2021 has no Vulkan on KMSDRM ("Vulkan subsystem 13 not supported",
+  # then exit), and up to 1.0 its config here asked for Vulkan: keep it on GL.
+  sed -i 's/^GraphicsBackend = 3.*/GraphicsBackend = 0 (OPENGL)/' $roms_config_directory_2021/PSP/SYSTEM/ppsspp.ini.sdl
+  cp -f $roms_config_directory_2021/PSP/SYSTEM/ppsspp.ini.sdl $roms_config_directory_2021/PSP/SYSTEM/ppsspp.ini
   /opt/ppsspp-2021/PPSSPPSDL --fullscreen "$2"
-  cp -f /$directory/psp/ppsspp/PSP/SYSTEM/ppsspp.ini /$directory/psp/ppsspp/PSP/SYSTEM/ppsspp.ini.sdl
+  cp -f $roms_config_directory_2021/PSP/SYSTEM/ppsspp.ini $roms_config_directory_2021/PSP/SYSTEM/ppsspp.ini.sdl
   sudo systemctl stop killer_daemon.service
   unset SDL_AUDIODRIVER
 else
@@ -70,7 +86,11 @@ else
 fi
 
 # Restore RK817 codec state after emulator exit — PPSSPP can leave the
-# audio path in a bad state.  Playback Path=HP is required for the external
-# speaker amplifier, Resume Path=ON ensures the codec restores after sleep.
-amixer -q sset 'Playback Path' HP 2>/dev/null
+# audio path in a bad state. Put back the path it had before, not a fixed one:
+# on the RG52 Mini the speaker amplifier is spk-ctl-gpios on the codec, which
+# the codec drives only on the SPK path, so the HP that used to be set here
+# silenced the speaker after every PSP game until a sleep or a reboot. SPK if
+# the path could not be read. Resume Path=ON ensures the codec restores after
+# sleep.
+amixer -q sset 'Playback Path' "${playback_path:-SPK}" 2>/dev/null
 amixer -q sset 'Resume Path' ON 2>/dev/null

@@ -46,7 +46,7 @@ if  [[ $1 == "standalone" ]]; then
       echo lz4 | sudo tee /sys/block/zram0/comp_algorithm
       echo 1G | sudo tee /sys/block/zram0/disksize
       sudo mkswap /dev/zram0
-      sudo swapon /dev/zram0 -p 5
+      sudo swapon /dev/zram0 -p 100
       printf "Launching ppsspp emulation now" >> /dev/tty1
     fi
   fi

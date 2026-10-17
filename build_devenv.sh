@@ -150,7 +150,7 @@ done <needed_dev_packages.txt
 # Symlink fix for DRM headers
 sudo chroot ${CHROOT_DIR}/ bash -c "ln -s /usr/include/libdrm/ /usr/include/drm"
 
-sudo chroot ${CHROOT_DIR}/ ldconfig
+sudo chroot ${CHROOT_DIR}/ ldconfig -X
 
 # Install meson
 sudo chroot ${CHROOT_DIR}/ bash -c "git clone https://github.com/mesonbuild/meson.git && ln -s /meson/meson.py /usr/bin/meson"

@@ -5,6 +5,8 @@
 # Requires: utils.sh (verify_action, call_chroot), BUILD_ARMHF env var
 # ==============================================================================
 
+COMPAT_LIBS_MISSING=""
+
 install_lib() {
     local url="$1"
     local lib_name="$2"
@@ -18,8 +20,15 @@ install_lib() {
     #verify_action
     dpkg --fsys-tarfile "$deb_arm64" | tar -xO --wildcards "*$wildcard*" > "$lib_name"
     if [ ! -s "$lib_name" ]; then
-        echo "[Error] Extraction failed for $lib_name"
-        exit 1
+        # These are optional shims for old PortMaster ports. Several of the
+        # URLs below pin versions that Debian security has since superseded and
+        # removed, so a 404 here is expected to happen again as bullseye ages.
+        # Warn and carry on: one missing shim is not worth discarding a build
+        # that takes most of a day. COMPAT_LIBS_MISSING is reported at the end.
+        echo "[WARNING] could not fetch $lib_name (arm64) from $url - skipping"
+        COMPAT_LIBS_MISSING="${COMPAT_LIBS_MISSING} ${lib_name}"
+        rm -f "$lib_name" "$deb_arm64"
+        return 0
     fi
     sudo mv -f "$lib_name" Arkbuild/usr/lib/aarch64-linux-gnu/
     call_chroot "chown root:root /usr/lib/aarch64-linux-gnu/$lib_name"
@@ -33,8 +42,10 @@ install_lib() {
         #verify_action
         dpkg --fsys-tarfile "$deb_armhf" | tar -xO --wildcards "*$wildcard*" > "$lib_name"
         if [ ! -s "$lib_name" ]; then
-            echo "[Error] Extraction failed for $lib_name (armhf)"
-            exit 1
+            echo "[WARNING] could not fetch $lib_name (armhf) - skipping"
+            COMPAT_LIBS_MISSING="${COMPAT_LIBS_MISSING} ${lib_name}:armhf"
+            rm -f "$lib_name" "$deb_armhf"
+            return 0
         fi
         sudo mv -f "$lib_name" Arkbuild/usr/lib/arm-linux-gnueabihf/
         call_chroot "chown root:root /usr/lib/arm-linux-gnueabihf/$lib_name"
@@ -44,37 +55,37 @@ install_lib() {
 
 # libjpeg8 (Debian snapshot, 2014) - PortMaster compatibility
 install_lib \
-    "https://snapshot.debian.org/archive/debian/20141009T042436Z/pool/main/libj/libjpeg8/libjpeg8_8d1-2_arm64.deb" \
+    "https://snapshot.debian.org/archive/debian-ports/20141009T073751Z/pool-arm64/main/libj/libjpeg8/libjpeg8_8d1-2_arm64.deb" \
     "libjpeg.so.8" "libjpeg.so.8"
 
 # libavcodec58 (FFmpeg 4.3.9, Debian 11 security)
 install_lib \
-    "http://security.debian.org/debian-security/pool/updates/main/f/ffmpeg/libavcodec58_4.3.9-0+deb11u2_arm64.deb" \
+    "https://snapshot.debian.org/archive/debian-security/20260116T220506Z/pool/updates/main/f/ffmpeg/libavcodec58_4.3.9-0+deb11u2_arm64.deb" \
     "libavcodec.so.58" "libavcodec.so.58"
 
 # libavutil56 (FFmpeg 4.3.9, Debian 11 security)
 install_lib \
-    "http://security.debian.org/debian-security/pool/updates/main/f/ffmpeg/libavutil56_4.3.9-0+deb11u2_arm64.deb" \
+    "https://snapshot.debian.org/archive/debian-security/20260116T220506Z/pool/updates/main/f/ffmpeg/libavutil56_4.3.9-0+deb11u2_arm64.deb" \
     "libavutil.so.56" "libavutil.so.56"
 
 # libswresample3 (FFmpeg 4.3.9, Debian 11 security)
 install_lib \
-    "http://security.debian.org/debian-security/pool/updates/main/f/ffmpeg/libswresample3_4.3.9-0+deb11u2_arm64.deb" \
+    "https://snapshot.debian.org/archive/debian-security/20260116T220506Z/pool/updates/main/f/ffmpeg/libswresample3_4.3.9-0+deb11u2_arm64.deb" \
     "libswresample.so.3" "libswresample.so.3"
 
 # libavformat58 (FFmpeg 4.3.9, Debian 11 security)
 install_lib \
-    "http://security.debian.org/debian-security/pool/updates/main/f/ffmpeg/libavformat58_4.3.9-0+deb11u2_arm64.deb" \
+    "https://snapshot.debian.org/archive/debian-security/20260116T220506Z/pool/updates/main/f/ffmpeg/libavformat58_4.3.9-0+deb11u2_arm64.deb" \
     "libavformat.so.58" "libavformat.so.58"
 
 # libswscale5 (FFmpeg 4.3.9, Debian 11 security)
 install_lib \
-    "http://security.debian.org/debian-security/pool/updates/main/f/ffmpeg/libswscale5_4.3.9-0+deb11u2_arm64.deb" \
+    "https://snapshot.debian.org/archive/debian-security/20260116T220506Z/pool/updates/main/f/ffmpeg/libswscale5_4.3.9-0+deb11u2_arm64.deb" \
     "libswscale.so.5" "libswscale.so.5"
 
 # libvpx6 (1.9.0, Debian 11 security)
 install_lib \
-    "http://security.debian.org/debian-security/pool/updates/main/libv/libvpx/libvpx6_1.9.0-1+deb11u5_arm64.deb" \
+    "https://snapshot.debian.org/archive/debian-security/20260222T183359Z/pool/updates/main/libv/libvpx/libvpx6_1.9.0-1+deb11u5_arm64.deb" \
     "libvpx.so.6" "libvpx.so.6"
 
 # libwebp6 (0.6.1, Debian 11 security)
@@ -84,7 +95,7 @@ install_lib \
 
 # libaom0 (1.0.0, Debian 11 security)
 install_lib \
-    "http://security.debian.org/debian-security/pool/updates/main/a/aom/libaom0_1.0.0.errata1-3+deb11u2_arm64.deb" \
+    "https://snapshot.debian.org/archive/debian-security/20240907T184326Z/pool/updates/main/a/aom/libaom0_1.0.0.errata1-3+deb11u2_arm64.deb" \
     "libaom.so.0" "libaom.so.0"
 
 # libdav1d4 (0.7.1, Debian 11)
@@ -147,3 +158,8 @@ install_lib \
     "http://archive.debian.org/debian/pool/main/libs/libssh/libssh-gcrypt-4_0.8.7-1+deb10u1_arm64.deb" \
     "libssh-gcrypt.so.4" "libssh-gcrypt.so.4"
 
+if [ -n "${COMPAT_LIBS_MISSING}" ]; then
+    echo ""
+    echo "[WARNING] compatibility libraries missing from this image:${COMPAT_LIBS_MISSING}"
+    echo "          PortMaster ports that need them will not start."
+fi

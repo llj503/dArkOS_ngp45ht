@@ -25,6 +25,9 @@ XIFAN NGP45HT 是一款 **Rockchip RK3562** 掌机：2 GB RAM、3.7 GB eMMC、10
 | `tools/ngp-shaders.sh` | **设备侧**遮罩/滤镜：install / install_masks / masks on·off·status·list / percore / apply / overlay / measure / verify / repair / status（详见上面「遮罩与滤镜」） |
 | `tools/ngp-bt-agent.py` `tools/ngp-bt-agent.service` `tools/install_bt_agent.sh` | BlueZ 配对应答 agent（auto-accept，`RequestPinCode` 回 `0000`）与它的 systemd 安装器 |
 | `tools/ngp-bt-pair.sh` `tools/btpair.sh` `tools/btdump.sh` | 配对 CLI、扫描+自动挑目标配对、广播/GATT 取证 dump |
+| `tools/ngp-panel/` | **屏幕色温/画面调节**（移植自 ROCKNIX `paneladj`）：`panelprop.py`（ctypes 写 DRM 连接器属性，无需 sudo/modetest）、`paneladj.sh`（CLI）、`屏幕色温.sh`（ES 系统菜单中文前端）、`ngp-panel-restore.service`（开机重放）、`install.sh`（镜像/卡片两用）、`mkpsf.py` + `Unifont-CJK-panel.psf.gz`（512 字形位中文控制台字体）。详见 `tools/ngp-panel/README.md` |
+| `tools/ngp-p1-switch.sh` | 外接手柄（USB/2.4G/BLE）在场时把内建手柄解绑让出 P1，走了自动绑回；udev 事件驱动 |
+| `tools/ngp-xpad-build.sh` | 给 5.10.226 现编 `xpad.ko`（带震动）并安装 + depmod，2.4G XInput 接收器用 |
 | `tools/btaic.sh` `tools/btaic2.sh` `tools/btnotify.sh` | 厂商 `aic_btusb` 实验（含强制灌补丁）与 GATT notify/轮询抓取，全部可逆 |
 | `tools/devsh.py` | 把本地 `.sh` 推到卡上以 ark 身份执行（顺手去 CRLF），例如 `python devsh.py ngp-core-update.sh plan` |
 | `tools/deploy_kernel.py` | 通过 SSH 把 Image + DTB 写到已装机的卡上（带空间检查和哈希校验） |
@@ -36,6 +39,23 @@ XIFAN NGP45HT 是一款 **Rockchip RK3562** 掌机：2 GB RAM、3.7 GB eMMC、10
 `tools/` 里保留了调试期的探针脚本，它们记录了每个结论是怎么量出来的；`assemble.sh`、
 `kbuild.sh`、`kbuild2.sh` 是过程历史，日常只需要 `slimbuild.sh` / `dtbrebuild.sh` / `fatpatch.py`。
 脚本顶部的 `/mnt/f/darkos/...` 是原作者的机器路径，用之前改成自己的。
+
+## 上游同步（mamaich/dArkOS_rg52mini v1.1）
+
+本仓库是 bmdhacks 基线上的 NGP45HT 移植，与上游 mamaich 的 RG52 Mini fork 同源。2026-10-17 合入了
+上游 v1.1（`ecb0922`）除 `.gitmodules`、`README.md` 和三个子模块指针外的全部 135 个变更/新增文件——
+上游不碰 `ngp45ht/`，所以合入零冲突。本仓库的差异只有三处：
+
+| 文件 | 处理 |
+|---|---|
+| `.gitmodules` / 三个子模块指针 | 保留本仓库版本：`kernel_rk3562` 指向 `llj503/kernel_rk3562` 的 `ngp45ht` 分支（我们的 DTS + 摇杆/触发器驱动补丁在里面） |
+| `finishing_touches-rk3562.sh` | panel-kick 只装 rg52mini（它的 rev-A 判定对没有 husb311 的设备恒真，NGP45HT 会白翻一次屏）；OTA 安装与 `/etc/darkos-release` 扩展到 `ngp45ht`；新增 NGP45HT 的面板组件安装块 |
+| `scripts/rk3562/darkos-ota` | 默认 feed 改指本仓库的 `ota/ngp45ht.json`（空 feed 起步；`DEVICE` 决定用哪份） |
+
+上游带来、本机直接受益的：`perfmax`/`perfnorm` 改为探测 GPU devfreq 节点（写死 `fde60000` 的问题已修）、
+内核模块 `--strip-debug`（`.ko` 约省 97%，p4 空间紧张下的实质缓解）、PortMaster E2BIG 修复、睡眠/电源键
+修复三件套（sleep hook + `pause.sh` + ES sleep/wake 脚本 + 背光记忆 udev 规则）、根目录归属修复、
+Wifi.sh 的 rk3562 开关、bttoggle 持久化、RetroArch 安全补丁 0021-0023。
 
 ## 构建
 

@@ -1,0 +1,18 @@
+[Unit]
+Description=Import wifikeyfile.txt from the Tools folder into NetworkManager
+# Upstream orders this Before=emulationstation.service. Here that would make
+# EmulationStation wait for NetworkManager, and so for the Wi-Fi driver - up to
+# half a minute on revision A (RK915) - on every boot, with or without a key
+# file. Run only when the file is there, in the background, once wlan0 exists.
+After=NetworkManager.service wifi-driver-load.service
+Wants=NetworkManager.service
+ConditionPathExistsGlob=/opt/system/Tools/[Ww][Ii][Ff][Ii][Kk][Ee][Yy][Ff][Ii][Ll][Ee].[Tt][Xx][Tt]
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/home/ark
+ExecStart=/usr/local/bin/importwifi.sh
+
+[Install]
+WantedBy=multi-user.target

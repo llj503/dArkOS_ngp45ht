@@ -3,6 +3,8 @@
 directory=$(dirname "$1" | cut -d "/" -f2)
 unlink /opt/hypseus-singe/roms
 ln -sfv /$directory/alg/roms/ /opt/hypseus-singe/roms
+unlink /opt/hypseus-singe/singe
+ln -sfv /$directory/alg/ /opt/hypseus-singe/singe
 
 if [[ $1 == "/$directory/alg/Scan_for_new_games.alg" ]]
 then
@@ -48,10 +50,27 @@ if [ -z $SINGEGAME ] ; then
 	exit 1
 fi
 
-if [ ! -f $HYPSEUS_SHARE/$SINGEGAME/$SINGEGAME.singe ] || [ ! -f $HYPSEUS_SHARE/$SINGEGAME/$SINGEGAME.txt ]; then
+GAME_DIR="$HYPSEUS_SHARE/$SINGEGAME"
+FRAMEFILE="$GAME_DIR/$SINGEGAME.txt"
+SINGE_SCRIPT="$GAME_DIR/$SINGEGAME.singe"
+ZLUA_ZIP="$GAME_DIR/$SINGEGAME.zip"
+
+if [ ! -f "$FRAMEFILE" ]; then
         echo
-        echo "Missing file: $HYPSEUS_SHARE/$SINGEGAME/$SINGEGAME.singe ?" | STDERR
-        echo "              $HYPSEUS_SHARE/$SINGEGAME/$SINGEGAME.txt ?" | STDERR
+        echo "Missing framefile: $FRAMEFILE ?" | STDERR
+        echo
+        exit 1
+fi
+
+if [ -f "$ZLUA_ZIP" ]; then
+        LUA_ARG="-zlua $ZLUA_ZIP"
+elif [ -f "$SINGE_SCRIPT" ]; then
+        LUA_ARG="-script $SINGE_SCRIPT"
+else
+        echo
+        echo "Missing Singe script or zlua zip:" | STDERR
+        echo "              $SINGE_SCRIPT ?" | STDERR
+        echo "          or  $ZLUA_ZIP ?" | STDERR
         echo
         exit 1
 fi
@@ -59,8 +78,8 @@ fi
 echo "VAR=hypseus-singe" > /home/ark/.config/KILLIT
 sudo systemctl restart killer_daemon.service
 
-if [ -f "$HYPSEUS_SHARE/$SINGEGAME/$SINGEGAME.commands" ]; then
-    EXTRAPARAMS=$(<"$HYPSEUS_SHARE/$SINGEGAME/$SINGEGAME.commands")
+if [ -f "$GAME_DIR/$SINGEGAME.commands" ]; then
+    EXTRAPARAMS=$(<"$GAME_DIR/$SINGEGAME.commands")
 fi
 
 if [[ $(cat /sys/class/graphics/fb0/modes | grep -o -P '(?<=:).*(?=p-)') == "720x720" ]]; then
@@ -71,8 +90,8 @@ $HYPSEUS_BIN singe vldp \
 -gamepad \
 -texturestream \
 ${RES} \
--framefile $HYPSEUS_SHARE/$SINGEGAME/$SINGEGAME.txt \
--script $HYPSEUS_SHARE/$SINGEGAME/$SINGEGAME.singe \
+-framefile "$FRAMEFILE" \
+$LUA_ARG \
 -homedir $HYPSEUS_HOME \
 -datadir $HYPSEUS_HOME \
 -fullscreen \

@@ -382,7 +382,7 @@ PairedDevices() {
 
 MainMenu() {
 
-  if [[ ! -z $(sudo systemctl status bluetooth | grep "disabled") ]]; then
+  if [[ ! -z $(sudo systemctl status bluetooth | grep "disabled;") ]]; then
     local BT_Stat="On"
 	local BT_MStat="Off"
   else

@@ -186,6 +186,35 @@
 		<hardware>console</hardware>
 	</system>
 	<system>
+		<name>fbneo</name>
+		<fullname>FinalBurn Neo</fullname>
+		<path>/roms/fbneo/</path>
+		<extension>.zip .ZIP .7z .7Z .cue .CUE</extension>
+		<command>sudo perfmax %GOVERNOR% %ROM%; nice -n -19 /usr/local/bin/%EMULATOR% -L /home/ark/.config/%EMULATOR%/cores/%CORE%_libretro.so %ROM%; sudo perfnorm</command>
+		<emulators>
+			<emulator name="retroarch">
+				<cores>
+					<core>fbneo</core>
+					<core>hbmame</core>
+					<core>fbalpha2012</core>
+					<core>mame2003_plus</core>
+					<core>mame</core>
+				</cores>
+			</emulator>
+			<emulator name="retroarch32">
+				<cores>
+					<core>fbalpha2016</core>
+					<core>fbalpha2018</core>
+				</cores>
+			</emulator>
+		</emulators>
+		<platform>arcade</platform>
+		<theme>arcade</theme>
+		<manufacturer>SNK/Capcom/Various</manufacturer>
+		<release>1990</release>
+		<hardware>arcade</hardware>
+	</system>
+	<system>
 		<name>arcade</name>
 		<fullname>Arcade</fullname>
 		<path>/roms/arcade/</path>
@@ -1339,7 +1368,13 @@
 		<fullname>NDS</fullname>
 		<path>/roms/nds/</path>
 		<extension>.7z .7Z .nds .NDS .zip .ZIP</extension>
-		<command>sudo perfmax %GOVERNOR% %ROM%; nice -n -19 /usr/local/bin/drastic.sh %ROM%; sudo perfnorm</command>
+		<command>sudo perfmax %GOVERNOR% %ROM%; nice -n -19 /usr/local/bin/nds.sh %EMULATOR% %ROM%; sudo perfnorm</command>
+		<emulators>
+			<emulator name="drastic">
+			</emulator>
+			<emulator name="dsperate">
+			</emulator>
+		</emulators>
 		<platform>nds</platform>
 		<theme>nds</theme>
 		<manufacturer>Nintendo</manufacturer>
@@ -2517,7 +2552,7 @@
 		<fullname>Ports</fullname>
 		<path>/roms/ports/</path>
 		<extension>.sh .SH</extension>
-		<command>sudo perfmax %GOVERNOR% %ROM%; nice -n -19 %ROM%; sudo perfnorm</command>
+		<command>sudo perfmax %GOVERNOR% %ROM%; nice -n -19 /usr/local/bin/runport.sh %ROM%; sudo perfnorm</command>
 		<platform>pc</platform>
 		<theme>ports</theme>
 		<manufacturer>Various</manufacturer>

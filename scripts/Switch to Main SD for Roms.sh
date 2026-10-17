@@ -15,14 +15,21 @@ if [ ! -d "/roms/" ]; then
     sudo mkdir /roms
 fi
 
+sudo umount /opt/system/Tools
+if [ -f /boot/dualboot ]; then
+  # dual-boot card: partition 5 is GammaOS's, the ROMs are in Android's storage
+  sudo umount /roms 2>/dev/null
+  sudo /usr/local/sbin/darkos-androidroms
+  status=$?
+else
 filesystem=`lsblk -no FSTYPE /dev/mmcblk1p5`
 if [ "$filesystem" = "ntfs" ]; then
 	filesystem="ntfs-3g"
 fi
 
-sudo umount /opt/system/Tools
 sudo mount -t $filesystem /dev/mmcblk1p5 /roms -o uid=1000
 status=$?
+fi
 
 #if [ $status -eq 0 ] || [ $status -eq 16 ]
 #then
@@ -78,7 +85,7 @@ status=$?
   unlink /home/ark/.config/ppsspp
   ln -sf /roms/psp/ppsspp/ /home/ark/.config/ppsspp
   sudo cp /usr/local/bin/Switch\ to\ SD2\ for\ Roms.sh /opt/system/Advanced/.
-  sudo rm /opt/system/Advanced/Switch\ to\ main\ SD\ for\ Roms.sh
+  sudo rm /opt/system/Advanced/Switch\ to\ Main\ SD\ for\ Roms.sh
   sudo cp -f /etc/samba/smb.conf.orig /etc/samba/smb.conf
   sudo umount /roms2
   sudo pkill filebrowser

@@ -1,9 +1,44 @@
 #!/bin/bash
+# A press while a suspend is under way: see pause.sh.
+phase=/run/darkos-sleep.phase
+again=/run/darkos-sleep.again
+if [ -r $phase ] && read -r p t < $phase && pgrep -x systemd-sleep > /dev/null; then
+  age=$(( $(date +%s%3N) - ${t:-0} ))
+  case $p in
+    pre)    [ $age -ge 1000 ] && sudo touch /run/darkos-sleep.wake; exit 0 ;;
+    asleep) exit 0 ;;
+    post)
+      [ $age -lt 1000 ] && exit 0
+      if [ ! -e $again ]; then
+        sudo touch $again
+        ( while pgrep -x systemd-sleep > /dev/null && [ $(( $(date +%s%3N) - t )) -lt 30000 ]; do sleep 0.2; done
+          sudo rm -f $again
+          "$0" ) > /dev/null 2>&1 &
+      fi
+      exit 0 ;;
+  esac
+fi
+# The "black" screensaver of ES, or another dark screen: see pause.sh.
+mark=/run/darkos-screensaver
+if [ -r $mark ] && read -r s v pid < $mark; then
+  [ "$s" = on ] && kill -0 "$pid" 2> /dev/null && exit 0
+  [ "$s" = off ] && [ $(( $(date +%s%3N) - ${v:-0} )) -lt 1500 ] && exit 0
+fi
+if [ "$(cat /sys/class/backlight/backlight/brightness)" = 0 ]; then
+  b=$(cat /run/darkos-brightness 2> /dev/null || cat /var/local/cur_bright.state 2> /dev/null)
+  echo ${b:-60} | sudo tee /sys/class/backlight/backlight/brightness > /dev/null
+  exit 0
+fi
 if [ ! -e "/home/ark/.config/.SWAPPOWERANDSUSPEND" ]; then
   sudo systemctl suspend
 else
   if [ ! -e "/dev/shm/.JUSTWOKEUP" ]; then
     /usr/local/bin/quickmode.sh
+    if [ -e "/roms/shutdownimages/bye.gif" ]; then
+      ffplay -x 1280 -y 720 -loglevel quiet /roms/shutdownimages/bye.gif &
+      (sleep 2s; kill -9 $(pidof ffplay))
+    fi
+    printf "\n\n\n\n\n\n\n      PEACE!" >> /dev/tty1
     sudo systemctl poweroff
   else
     rm /dev/shm/.JUSTWOKEUP

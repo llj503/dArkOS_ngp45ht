@@ -87,6 +87,36 @@ if [ "$(cat /etc/hostname 2>/dev/null)" == "rg43h" ]; then
   fi
 fi
 
+# --- Dual-boot "dArkOS + GammaOS" card ---------------------------------------
+# Partition 5 is GammaOS's boot FAT there and there is no ROMS partition: the
+# ROMs come from Android's userdata (darkos-androidroms.service). Nothing here
+# may touch the partition table. Recognised by /boot/dualboot, which the
+# combined image's builder puts there, and as a safeguard by an Android
+# userdata partition or by more than five partitions on this card (not
+# /dev/disk/by-partlabel: the internal eMMC holds an Android userdata too).
+dualboot=""
+if [ -f /boot/dualboot ] || \
+   lsblk -ln -o PARTLABEL /dev/${primary_block} 2>/dev/null | grep -qx userdata || \
+   [ "$(lsblk -n -o NAME /dev/${primary_block} 2>/dev/null | wc -l)" -gt 6 ]; then
+  dualboot=1
+fi
+if [ -n "$dualboot" ]; then
+  dialog --infobox "Dual-boot card: the partitions stay as they are. The ROMs come from the Android storage (the ROMs folder) once the Android system has been started at least once." $height $width 2>&1 > /dev/tty1
+  sudo touch /boot/dualboot
+  getent group media_rw > /dev/null 2>&1 || sudo groupadd -g 1023 media_rw
+  sudo usermod -aG media_rw ark
+  sudo cp -f /boot/fstab.dualboot /etc/fstab
+  sudo rm -f /boot/fstab.exfat /boot/fstab.dualboot /boot/doneit
+  sync
+  systemctl enable darkos-androidroms.service &> /dev/null
+  systemctl disable firstboot.service &> /dev/null
+  sudo rm -f /boot/firstboot.sh
+  sudo rm -- "$0"
+  sleep 8
+  reboot
+  exit 0
+fi
+
 dialog --infobox "EASYROMS partition expansion and conversion to exfat in process.  Please wait..." $height $width 2>&1 > /dev/tty1
 sleep 5
 
@@ -192,7 +222,7 @@ sleep 5
     sudo cp -f /boot/fstab.exfat /etc/fstab &> /dev/null
     sync
     sudo rm -f /boot/doneit &> /dev/null
-    sudo rm -f /boot/fstab.exfat &> /dev/null
+    sudo rm -f /boot/fstab.exfat /boot/fstab.dualboot &> /dev/null
     echo 100
 ) | dialog --title "Firstboot setup of dArkOS" --gauge "Expanding rootfs and exfat partitions.  Please wait..." $height $width 0 2>&1 > /dev/tty1
 

@@ -8,7 +8,16 @@ if [ "$ROOT_FILESYSTEM_FORMAT" == "xfs" ] || [ "$ROOT_FILESYSTEM_FORMAT" == "btr
     ROOT_FILESYSTEM_FORMAT_PARAMETERS="-f -L ROOTFS"
     ROOT_FILESYSTEM_MOUNT_OPTIONS="defaults,noatime"
   else
-    ROOT_FILESYSTEM_FORMAT_PARAMETERS="-O ^free-space-tree -f -L ROOTFS"
+    # Disable free-space-tree
+    # In some btrfs-progs versions, this is listed as a filesystem feature (-O)
+    if sudo mkfs.btrfs -O list-all 2>&1 | grep -q "free-space-tree"; then
+      ROOT_FILESYSTEM_FORMAT_PARAMETERS="-O ^free-space-tree -f -L ROOTFS"
+    # In some btrfs-progs versions, this is listed as a runtime features (-R)
+    elif sudo mkfs.btrfs -R list-all 2>&1 | grep -q "free-space-tree"; then
+      ROOT_FILESYSTEM_FORMAT_PARAMETERS="-R ^free-space-tree -f -L ROOTFS"
+    else
+      ROOT_FILESYSTEM_FORMAT_PARAMETERS="-f -L ROOTFS"
+    fi
     ROOT_FILESYSTEM_MOUNT_OPTIONS="defaults,noatime,compress=zlib:1"
   fi
 elif [[ "$ROOT_FILESYSTEM_FORMAT" == *"ext"* ]]; then

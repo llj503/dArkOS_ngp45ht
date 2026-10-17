@@ -21,6 +21,32 @@ fi
 # SDL2 create landscape GBM surfaces and use the Rockchip RGA hardware
 # to rotate each frame 270 degrees before scanout to the portrait panel.
 # Patches are renamed to avoid the "odroidgoa" skip logic in sdl2.sh.
+# Every script that needs core_builds inside a chroot clones it from
+# christianhaitian if the directory is absent, and this is the first one to run,
+# so whatever it leaves behind is what all the later ones use. For rk3562 that
+# is the wrong tree: it is the upstream of our fork, with the Cortex-A55 build
+# flags and the miniloong patches whose hunks collide with our rotation patch.
+# The 64-bit chroot gets the fork copied in by build_rg52mini.sh; the 32-bit one
+# had nothing doing that until build_retroarch.sh, far too late and only when
+# RetroArch32 is not restored from cache. Settle it here, for whichever chroot
+# is current, before anything else has a chance to clone the wrong one.
+if [ "$CHIPSET" == "rk3562" ]; then
+  # A marker file, not a check of the git remote: the copy carries the
+  # submodule's .git, which is a file pointing into the superproject's
+  # .git/modules and resolves to nothing inside a chroot. Asking such a copy
+  # where it came from fails, so the comparison would never settle and the
+  # tree would be re-copied on every build.
+  CB_DIR=${CHROOT_DIR}/home/ark/${CHIPSET}_core_builds
+  if [ ! -f "${CB_DIR}/.darkos-local-fork" ]; then
+    echo "Replacing ${CHROOT_DIR}'s core_builds with the local rk3562 fork..."
+    sudo rm -rf ${CB_DIR}
+    sudo mkdir -p ${CHROOT_DIR}/home/ark
+    sudo cp -a rk3562_core_builds ${CB_DIR}
+    sudo touch ${CB_DIR}/.darkos-local-fork
+    sudo chown -R 1000:1000 ${CB_DIR}
+  fi
+fi
+
 if [ "$UNIT" == "rg52mini" ]; then
   echo "Injecting RGA screen rotation patches for portrait panel..."
   # Ensure core_builds is cloned first so we can add patches
@@ -29,6 +55,9 @@ if [ "$UNIT" == "rg52mini" ]; then
     "
   sudo cp sdl2-patch-0004-odroidgoa-kmsdrm.patch ${CHROOT_DIR}/home/ark/${CHIPSET}_core_builds/patches/sdl2-patch-0005-kmsdrm-rotation.patch
   sudo cp sdl2-patch-0005-odroidgoa-rotate-cursor.patch ${CHROOT_DIR}/home/ark/${CHIPSET}_core_builds/patches/sdl2-patch-0006-rotate-cursor.patch
+  # Scaled fullscreen modes (960x540 ... 640x360), scaled onto the panel by
+  # the same RGA pass that rotates; needs the rotation patch above.
+  sudo cp sdl2-patch-0008-kmsdrm-scaled-modes.patch ${CHROOT_DIR}/home/ark/${CHIPSET}_core_builds/patches/sdl2-patch-0008-kmsdrm-scaled-modes.patch
 fi
 
 # Build and install SDL2

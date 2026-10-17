@@ -16,6 +16,19 @@ else
   usr_dmc_speed="528000000"
 fi
 
+# The GPU node differs per SoC - ff400000 on RK3326, fde60000 on RK3566,
+# ff320000 on RK3562 - and every write below goes to
+# /sys/devices/platform/${gpu}.gpu/devfreq/${gpu}.gpu/. Hardcoding it meant
+# that on RK3562 each of those writes landed on a path that does not exist,
+# failed silently, and left the GPU on simple_ondemand for the whole game.
+# Ask the kernel instead, and keep the old value as a fallback.
+for _devfreq in /sys/class/devfreq/*.gpu; do
+  [ -e "${_devfreq}" ] || continue
+  _name="$(basename "${_devfreq}")"
+  gpu="${_name%.gpu}"
+  break
+done
+
 if [[ ! -z "$isitrk3326" ]] && [[ $(tty) != *"pts"* ]]; then
   rm /home/ark/.asoundrc
 fi
@@ -90,7 +103,18 @@ chmod 777 /sys/devices/platform/${gpu}.gpu/devfreq/${gpu}.gpu/governor
 chmod 777 /sys/devices/system/cpu/cpufreq/policy0/scaling_governor
 chmod 777 /sys/devices/platform/dmc/devfreq/dmc/governor
 
-if [[ "$1" == "kodi" ]]; then
+# "overclock" (RG52 Mini): perfoc sets every governor and limit itself, and
+# perfmax falls back to performance where the overclock steps are missing.
+# Any other choice first undoes it, should a game before have left it on.
+if [[ "$1" == "overclock" ]]; then
+  [ -x /usr/local/bin/perfoc ] && /usr/local/bin/perfoc on || set -- performance "${@:2}"
+elif [ -x /usr/local/bin/perfoc ]; then
+  /usr/local/bin/perfoc off
+fi
+
+if [[ "$1" == "overclock" ]]; then
+  :
+elif [[ "$1" == "kodi" ]]; then
   echo "performance" > /sys/devices/platform/${gpu}.gpu/devfreq/${gpu}.gpu/governor
   echo "performance" > /sys/devices/system/cpu/cpufreq/policy0/scaling_governor
   echo "performance" > /sys/devices/platform/dmc/devfreq/dmc/governor

@@ -1,0 +1,10 @@
+[Unit]
+Description=dArkOS OTA: confirm an update once the system is up on it
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/darkos-ota boot-ok
+
+[Install]
+WantedBy=multi-user.target

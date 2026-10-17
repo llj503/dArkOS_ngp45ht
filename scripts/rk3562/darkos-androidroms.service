@@ -1,0 +1,15 @@
+[Unit]
+Description=dArkOS dual-boot card: ROMs from the Android storage
+ConditionPathExists=/boot/dualboot
+After=local-fs.target systemd-udev-trigger.service
+Before=emulationstation.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/darkos-androidroms
+# the first boot lays out the ROMs folder and copies the themes
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

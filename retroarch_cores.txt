@@ -47,6 +47,7 @@ handy
 hatari
 hatarib
 libgametank
+lowresnx
 mame
 mame2000
 mame2003

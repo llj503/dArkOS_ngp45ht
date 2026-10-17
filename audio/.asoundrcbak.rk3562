@@ -12,7 +12,12 @@ ctl.!default {
 }
 
 pcm.ddmix {
+        # One dmix for all users (no ipc_key_add_uid), open to all: ports run
+        # as root (runport.sh) share it with ES and fluidsynth running as ark.
+        # A per-user dmix would make the second one find the card busy, and a
+        # 0600 one created by root would lock ark out.
         ipc_key         1024
+        ipc_perm        0666
         type            dmix
         slave {
                 pcm         "hw:0,0"

@@ -56,9 +56,42 @@ fi
 # Mali GPU blob (g29p1) is installed by build_deps.sh from BSP/mali*.tar.gz
 # Only the DTB and firmware are required from BSP
 
-# Ensure kernel .config exists
+# Boot logo. U-Boot draws nothing on this device: the device tree it runs with
+# is the Rockchip evaluation-board stub, with no dsi, panel, vop or route nodes,
+# so logo.bmp in the resource partition and logo.bmp on the FAT partition were
+# both tried and both did nothing. The first thing that lights the panel is the
+# kernel, so the logo comes from CONFIG_LOGO and fbcon draws it as soon as the
+# framebuffer is up.
+#
+# The artwork is the vendor's, taken from the EmuELEC boot partition, already
+# rotated counter-clockwise to 1280x720 so that fbcon=rotate:1 turns it back
+# upright. It is stored gzipped because pnmtologo only accepts text PNM, which
+# is 8.3 MB uncompressed and 81 KB packed.
+LOGO_SRC="${BSP_PATH}/logo_linux_clut224.ppm.gz"
+LOGO_DST="${KERNEL_SRC_PATH}/drivers/video/logo/logo_linux_clut224.ppm"
+if [ -f "${LOGO_SRC}" ]; then
+  echo "Installing boot logo..."
+  gzip -dc "${LOGO_SRC}" > "${LOGO_DST}"
+else
+  echo "WARNING: ${LOGO_SRC} missing - the build will show the stock penguin"
+fi
+
+# Ensure the kernel .config exists and is not older than the defconfig.
+#
+# This used to be "if [ ! -f .config ]", which generated the config once and
+# never again, so every edit to ${UNIT}_defconfig was ignored by every later
+# build - silently, because the kernel still builds fine with the old config.
+# That is how CONFIG_LOGO, CONFIG_CRYPTO_LZ4 and CONFIG_ZRAM_WRITEBACK were all
+# committed, built, and absent from the 2026-09-16 image: its .config was three
+# days older than the defconfig it was supposed to come from.
+KERNEL_DEFCONFIG="${KERNEL_SRC_PATH}/arch/arm64/configs/${UNIT}_defconfig"
 if [ ! -f "${KERNEL_SRC_PATH}/.config" ]; then
   echo "Generating kernel .config from ${UNIT}_defconfig..."
+  make -C "${KERNEL_SRC_PATH}" ${UNIT}_defconfig
+elif [ "${KERNEL_DEFCONFIG}" -nt "${KERNEL_SRC_PATH}/.config" ]; then
+  echo "${UNIT}_defconfig is newer than .config - regenerating."
+  echo "Any hand-made menuconfig changes will be lost; put them in the"
+  echo "defconfig if they are meant to survive."
   make -C "${KERNEL_SRC_PATH}" ${UNIT}_defconfig
 fi
 
@@ -96,9 +129,33 @@ echo "Copying kernel and DTB..."
 sudo cp "${KERNEL_SRC_PATH}/arch/arm64/boot/Image" ${mountpoint}/
 sudo cp "${DTB_FILE}" ${mountpoint}/${UNIT_DTB}.dtb
 
-# Copy battery charge animation BMPs for U-Boot charge display
-echo "Copying charge animation BMPs..."
+# Artwork for U-Boot: the splash it shows at power-on and the charge
+# animation. Both are read off this partition as ordinary files, because the
+# resource partition is empty on this device.
+#
+# The BMPs must be 24-bit and uncompressed - the vendor's own frames are 8-bit
+# RLE and this U-Boot will not draw them. logo.bmp is 720x1280, the panel's
+# native portrait orientation; the charge frames are 220x110, centred.
+#
+# These are matched to the RG52 Mini bootloader and are copied for every unit.
+# The RG43 Pro still runs the vendor U-Boot (BSP/uboot-rg43h.img, 2017.09 on
+# the rk3562-evb tree), which has no panel nodes and draws nothing either way,
+# so the change is believed to be moot there - but it is untested on that
+# device. Its original 8-bit frames are one command away if that turns out to
+# matter: git show 7e96820:BSP/battery_0.bmp > BSP/battery_0.bmp
+echo "Copying U-Boot artwork..."
 sudo cp ${BSP_PATH}/battery_*.bmp ${mountpoint}/ 2>/dev/null || true
+if [ -f "${BSP_PATH}/logo.bmp" ]; then
+  sudo cp ${BSP_PATH}/logo.bmp ${mountpoint}/
+else
+  echo "WARNING: ${BSP_PATH}/logo.bmp missing - U-Boot will show no splash"
+fi
+
+# Never ship logo_kernel.bmp. U-Boot hands that one to the kernel to keep
+# displaying during boot, and on this device the handover blanks the panel:
+# boot proceeds normally and the screen stays black once the system reaches
+# the display. Without it the kernel brings the display up itself.
+sudo rm -f ${mountpoint}/logo_kernel.bmp
 
 # Install kernel modules from source build
 echo "Installing kernel modules..."
@@ -124,7 +181,7 @@ sudo cp ${BSP_PATH}/mali/libmali-hook.so.1.9.0 Arkbuild/usr/lib/aarch64-linux-gn
 )
 
 # Run ldconfig to update library cache
-sudo chroot Arkbuild/ ldconfig
+sudo chroot Arkbuild/ ldconfig -X
 
 # Create kernel config for initramfs-tools
 echo "Creating kernel config for initramfs-tools..."

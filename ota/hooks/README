@@ -1,0 +1,25 @@
+Hooks of a release: ota/hooks/<version>.sh or <version>-<name>.sh go into the
+package that updates to <version> and run as root after its files are in
+place (OTA_FROM, OTA_TO, OTA_DUALBOOT=0|1 in the environment). For what a file
+copy cannot do: a group to add, a service to enable, a setting to change in a
+file the user may have edited. A hook must be safe to run twice. A hook that
+fails undoes the whole update.
+
+The clients of the 1.1 test builds run hooks with the PATH of whoever ran the
+client, and sudo keeps ark's, which has no sbin: a hook sets its own PATH.
+
+A hook that changes files adds their paths to /var/lib/darkos-ota/merged, one
+per line, and the client (1.1 on) puts them back from the snapshot on a
+rollback.
+
+all-<name>.sh goes into every package, after the release's own hooks, in name
+order:
+- all-fix-root-dir.sh gives / back to root (the images up to 1.1's test
+  builds had it as ark's) and removes what PPSSPP 1.12.3 left there;
+- all-keep-quickmode.sh, while Quick Mode is on, puts its pause.sh and
+  finish.sh back over the update's, and its entry in Options -> Advanced;
+- all-ldconfig.sh rebuilds the dynamic linker's cache, which packages do not
+  carry;
+- all-merge-dpkg.sh merges the package database (dpkg status, apt's
+  extended_states) with the device's, from the old build's copy the package
+  carries in hooks/base/. It comes last, and never fails.

@@ -1,0 +1,11 @@
+[Unit]
+Description=Revision A: power-cycle the panel before EmulationStation takes the display
+Before=emulationstation.service
+
+[Service]
+# oneshot so EmulationStation waits for it; it takes about a second
+Type=oneshot
+ExecStart=/usr/local/bin/panel-kick.sh
+
+[Install]
+WantedBy=multi-user.target

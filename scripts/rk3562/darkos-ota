@@ -1,0 +1,768 @@
+#!/usr/bin/python3
+# darkos-ota: over-the-air updates for dArkOS (RG52 Mini upstream, NGP45HT here).
+#
+# A package carries the files that differ between two builds of the image -
+# the root filesystem (p4, btrfs) and the boot partition (p3, vfat) - and, if
+# it changed, the boot loader. It applies to exactly one build: the one its
+# manifest names in from_build_id, compared against BUILD_ID in
+# /etc/darkos-release. Each file carries the sha256 it had in the old build and
+# in the new one, so that what the user changed is not overwritten.
+#
+# On a dual-boot card (/boot/dualboot) the boot loader and everything of
+# GammaOS belong to GammaOS: the loader is never written, and the files the
+# dual-boot builder puts on p3 are never replaced or deleted.
+#
+# Before the root filesystem is touched a read-only btrfs snapshot of it is
+# taken, and the boot files about to change are copied aside; a failure while
+# applying puts everything back, and "rollback" does the same after a reboot.
+#
+# docs/OTA.md describes the format and the release procedure.
+
+import argparse
+import fnmatch
+import hashlib
+import json
+import os
+import shutil
+import stat
+import subprocess
+import sys
+import tarfile
+import time
+import urllib.request
+
+RELEASE_FILE = "/etc/darkos-release"
+CONF_FILE = "/etc/darkos-ota.conf"
+FEED_OVERRIDE = "/home/ark/.config/darkos-ota-feed"
+STATE_DIR = "/var/lib/darkos-ota"
+WORK_DIR = "/var/cache/darkos-ota"
+LOG_FILE = STATE_DIR + "/ota.log"
+MERGED_LIST = STATE_DIR + "/merged"
+LOCAL_DIRS = ["/roms/update", "/roms/tools/update"]
+SNAP_PREFIX = "/.ota-snapshot-"
+# The feed is per device and lives in this repo: ota/ngp45ht.json here, the
+# upstream's ota/rg52mini.json there. DEVICE in /etc/darkos-release picks one,
+# and FEED_OVERRIDE wins over both.
+DEFAULT_FEED = ("https://raw.githubusercontent.com/llj503/dArkOS_ngp45ht/"
+                "master/ota/ngp45ht.json")
+FORMAT = 1
+
+# p3 files that belong to the dual-boot builder (and the boot loader's menu):
+# never replaced, never deleted.
+BOOT_PROTECTED = ["dualboot", "bootmenu_*.bmp", "bootmenu2_*.bmp"]
+# Paths a user is expected to edit: a file there that differs from both the
+# old and the new build is kept, and the new one is put beside it.
+USER_PREFIXES = ["etc/", "home/", "root/", "var/lib/"]
+
+
+class OtaError(Exception):
+    pass
+
+
+def log(msg):
+    line = time.strftime("%Y-%m-%d %H:%M:%S ") + msg
+    print(msg, flush=True)
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(LOG_FILE, "a") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+
+
+def read_kv(path):
+    d = {}
+    try:
+        with open(path) as f:
+            for ln in f:
+                ln = ln.strip()
+                if "=" in ln and not ln.startswith("#"):
+                    k, v = ln.split("=", 1)
+                    d[k.strip()] = v.strip().strip('"')
+    except OSError:
+        pass
+    return d
+
+
+def release():
+    r = read_kv(RELEASE_FILE)
+    if "BUILD_ID" not in r:
+        raise OtaError("%s has no BUILD_ID: this build predates OTA updates "
+                       "(1.1); write the image of a newer release to the card"
+                       % RELEASE_FILE)
+    return r
+
+
+def sha256_file(path, bufsize=1 << 20):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            b = f.read(bufsize)
+            if not b:
+                break
+            h.update(b)
+    return h.hexdigest()
+
+
+def current_hash(path):
+    """sha256 of a regular file, "link:<target>" of a symlink, "dir" of a
+    directory, None if absent."""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(st.st_mode):
+        return "link:" + os.readlink(path)
+    if stat.S_ISDIR(st.st_mode):
+        return "dir"
+    if stat.S_ISREG(st.st_mode):
+        return sha256_file(path)
+    return "other"
+
+
+def is_dualboot():
+    return os.path.exists("/boot/dualboot")
+
+
+def root_disk():
+    src = subprocess.run(["findmnt", "-n", "-o", "SOURCE", "/"],
+                         capture_output=True, text=True).stdout.strip()
+    src = src.split("[")[0]
+    pk = subprocess.run(["lsblk", "-n", "-o", "PKNAME", src],
+                        capture_output=True, text=True).stdout.strip()
+    if not pk:
+        raise OtaError("cannot find the disk the root filesystem is on")
+    return "/dev/" + pk.splitlines()[0]
+
+
+def uboot_partition():
+    """The partition named uboot on the disk dArkOS runs from (the eMMC
+    carries one of its own, which must not be touched)."""
+    disk = root_disk()
+    out = subprocess.run(["lsblk", "-n", "-r", "-o", "NAME,TYPE", disk],
+                         capture_output=True, text=True).stdout
+    for ln in out.splitlines():
+        name, typ = (ln.split() + ["", ""])[:2]
+        if typ != "part":
+            continue
+        # the GPT entry itself, not udev's copy of it
+        label = subprocess.run(["blkid", "-p", "-o", "value", "-s",
+                                "PART_ENTRY_NAME", "/dev/" + name],
+                               capture_output=True, text=True).stdout.strip()
+        if label == "uboot":
+            return "/dev/" + name
+    raise OtaError("no uboot partition on " + disk)
+
+
+def battery_ok(minimum):
+    base = "/sys/class/power_supply"
+    try:
+        for n in os.listdir(base):
+            p = os.path.join(base, n)
+            if open(os.path.join(p, "type")).read().strip() != "Battery":
+                continue
+            cap = int(open(os.path.join(p, "capacity")).read().strip())
+            st = open(os.path.join(p, "status")).read().strip()
+            return cap >= minimum or st in ("Charging", "Full"), cap
+    except (OSError, ValueError):
+        pass
+    return True, None
+
+
+def free_bytes(path):
+    s = os.statvfs(path)
+    return s.f_bavail * s.f_frsize
+
+
+# ---------------------------------------------------------------- feed
+
+def feed_url(override=None):
+    if override:
+        return override
+    try:
+        u = open(FEED_OVERRIDE).read().strip()
+        if u:
+            return u
+    except OSError:
+        pass
+    return read_kv(CONF_FILE).get("FEED", DEFAULT_FEED)
+
+
+def fetch(url, timeout=60):
+    if url.startswith("/") or url.startswith("file://"):
+        return open(url.replace("file://", ""), "rb").read()
+    req = urllib.request.Request(url, headers={"User-Agent": "darkos-ota",
+                                               "Cache-Control": "no-cache"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read()
+
+
+def check(feed=None):
+    """The newest feed entry that applies to this build, or None."""
+    rel = release()
+    url = feed_url(feed)
+    data = json.loads(fetch(url).decode())
+    cands = [e for e in data.get("response", [])
+             if e.get("from_build_id") == rel["BUILD_ID"]
+             and e.get("device", "rg52mini") == rel.get("DEVICE", "rg52mini")]
+    if not cands:
+        return None
+    return max(cands, key=lambda e: e.get("build_id", ""))
+
+
+def local_packages():
+    rel = release()
+    found = []
+    for d in LOCAL_DIRS:
+        if not os.path.isdir(d):
+            continue
+        for n in sorted(os.listdir(d)):
+            if not n.endswith(".tar"):
+                continue
+            p = os.path.join(d, n)
+            try:
+                m = read_manifest(p)
+            except Exception:
+                continue
+            if m.get("from_build_id") == rel["BUILD_ID"]:
+                found.append((p, m))
+    return found
+
+
+def dl_dir():
+    """Downloads go to a subvolume of their own, so that the snapshot of /
+    taken before an update does not pin them."""
+    d = os.path.join(WORK_DIR, "dl")
+    if not os.path.isdir(d):
+        os.makedirs(WORK_DIR, exist_ok=True)
+        if subprocess.run(["btrfs", "subvolume", "create", d],
+                          capture_output=True).returncode != 0:
+            os.makedirs(d, exist_ok=True)
+    return d
+
+
+def download(entry):
+    dst = os.path.join(dl_dir(), entry["filename"])
+    need = int(entry.get("size", 0))
+    if os.path.exists(dst) and os.path.getsize(dst) == need and \
+            sha256_file(dst) == entry["sha256"]:
+        log("already downloaded: " + dst)
+        return dst
+    if free_bytes("/") < need * 3 + (200 << 20):
+        raise OtaError("not enough space on the root filesystem: the update "
+                       "needs about %d MiB" % ((need * 3) >> 20))
+    part = dst + ".part"
+    log("downloading %s (%d MiB)" % (entry["url"], need >> 20))
+    have = os.path.getsize(part) if os.path.exists(part) else 0
+    req = urllib.request.Request(entry["url"], headers={"User-Agent": "darkos-ota"})
+    if have:
+        req.add_header("Range", "bytes=%d-" % have)
+    with urllib.request.urlopen(req, timeout=120) as r:
+        mode = "ab" if have and r.status == 206 else "wb"
+        done = have if mode == "ab" else 0
+        last = 0
+        with open(part, mode) as f:
+            while True:
+                b = r.read(1 << 20)
+                if not b:
+                    break
+                f.write(b)
+                done += len(b)
+                if need and time.time() - last > 2:
+                    last = time.time()
+                    print("PROGRESS %d" % (done * 100 // need), flush=True)
+    if sha256_file(part) != entry["sha256"]:
+        os.unlink(part)
+        raise OtaError("the downloaded package is damaged (sha256 mismatch); "
+                       "try again")
+    os.replace(part, dst)
+    return dst
+
+
+# ---------------------------------------------------------------- package
+
+def read_manifest(pkg):
+    with tarfile.open(pkg, "r:") as t:
+        m = json.load(t.extractfile("manifest.json"))
+    if m.get("format") != FORMAT:
+        raise OtaError("package format %s is not supported by this updater"
+                       % m.get("format"))
+    return m
+
+
+def boot_protected(path):
+    name = path.split("/")[-1]
+    return "/" not in path and any(fnmatch.fnmatch(name, p)
+                                   for p in BOOT_PROTECTED)
+
+
+def target(entry):
+    base = "/" if entry["part"] == "root" else "/boot/"
+    return base + entry["path"]
+
+
+def plan(m):
+    """Decide per entry: apply, skip (already new), keep (user changed it, the
+    new file goes beside it), or force (system file changed by hand)."""
+    dual = is_dualboot()
+    out = []
+    for e in m["files"]:
+        if e["part"] == "boot" and dual and boot_protected(e["path"]):
+            out.append(("protected", e))
+            continue
+        cur = current_hash(target(e))
+        new = e.get("sha256")
+        if e["type"] == "dir":
+            out.append(("apply", e))
+        elif cur == new and not e.get("meta"):
+            out.append(("skip", e))
+        elif cur == e.get("old_sha256") or (cur is None and e.get("old_sha256") is None):
+            out.append(("apply", e))
+        elif e["part"] == "root" and any(e["path"].startswith(p) for p in USER_PREFIXES):
+            out.append(("keep", e))
+        else:
+            out.append(("force", e))
+    dels = []
+    for e in m.get("delete", []):
+        if e["part"] == "boot" and dual and boot_protected(e["path"]):
+            continue
+        cur = current_hash(target(e))
+        if cur is None:
+            continue
+        if e["part"] == "root" and any(e["path"].startswith(p) for p in USER_PREFIXES) \
+                and e.get("old_sha256") not in (None, cur):
+            dels.append(("keep", e))
+        else:
+            dels.append(("apply", e))
+    return out, dels
+
+
+def verify_payload(pkg, m, stage):
+    """Unpack the payload into stage (on the root filesystem, so that files
+    move into place with a rename) and check every file against the
+    manifest."""
+    if os.path.exists(stage):
+        shutil.rmtree(stage)
+    os.makedirs(stage)
+    with tarfile.open(pkg, "r:") as t:
+        names = t.getnames()
+        if "payload.tar.zst" in names:
+            t.extract("payload.tar.zst", stage, filter="fully_trusted")
+        for n in names:
+            if n == "uboot.img" or n.startswith("hooks/"):
+                t.extract(n, stage, filter="fully_trusted")
+    pz = os.path.join(stage, "payload.tar.zst")
+    if os.path.exists(pz):
+        if sha256_file(pz) != m["payload_sha256"]:
+            raise OtaError("payload sha256 mismatch")
+        subprocess.run(["tar", "--zstd", "-x", "-p", "--numeric-owner",
+                        "-f", pz, "-C", stage], check=True)
+        os.unlink(pz)
+    for e in m["files"]:
+        if e["type"] == "file" and not e.get("meta"):
+            p = os.path.join(stage, e["part"], e["path"])
+            if not os.path.isfile(p) or sha256_file(p) != e["sha256"]:
+                raise OtaError("damaged file in the package: " + e["path"])
+    if m.get("uboot"):
+        if sha256_file(os.path.join(stage, "uboot.img")) != m["uboot"]["sha256"]:
+            raise OtaError("damaged boot loader in the package")
+
+
+def set_meta(path, e, follow=False):
+    if e["type"] == "link":
+        os.lchown(path, e["uid"], e["gid"])
+        return
+    if e["part"] == "root":
+        os.chown(path, e["uid"], e["gid"])
+        os.chmod(path, e["mode"])
+
+
+def put(e, stage, journal, beside=False):
+    dst = target(e)
+    if beside:
+        dst += ".ota-new"
+    parent = os.path.dirname(dst)
+    os.makedirs(parent, exist_ok=True)
+    if e["type"] == "dir":
+        if os.path.islink(dst) or (os.path.exists(dst) and not os.path.isdir(dst)):
+            journal.append(("replaced", dst))
+            os.unlink(dst)
+        if not os.path.isdir(dst):
+            os.mkdir(dst)
+            journal.append(("created", dst))
+        set_meta(dst, e)
+        return
+    tmp = os.path.join(parent, ".ota-tmp." + os.path.basename(dst))
+    if os.path.lexists(tmp):
+        os.unlink(tmp)
+    if e["type"] == "link":
+        os.symlink(e["target"], tmp)
+    elif e.get("meta"):
+        if not os.path.exists(dst):
+            return
+        journal.append(("replaced", dst))
+        set_meta(dst, e)
+        return
+    else:
+        src = os.path.join(stage, e["part"], e["path"])
+        if e["part"] == "root":
+            try:
+                os.link(src, tmp)
+            except OSError:
+                shutil.copy2(src, tmp)
+        else:
+            shutil.copyfile(src, tmp)
+            with open(tmp, "rb+") as f:
+                os.fsync(f.fileno())
+    set_meta(tmp, e)
+    if os.path.isdir(dst) and not os.path.islink(dst):
+        shutil.rmtree(dst)
+    existed = os.path.lexists(dst)
+    os.replace(tmp, dst)
+    journal.append(("replaced" if existed else "created", dst))
+
+
+def remove(e, journal):
+    p = target(e)
+    if os.path.isdir(p) and not os.path.islink(p):
+        try:
+            os.rmdir(p)
+        except OSError:
+            return
+    else:
+        os.unlink(p)
+    journal.append(("deleted", p))
+
+
+# ---------------------------------------------------------------- snapshot
+
+def snapshots():
+    return sorted(p for p in ("/" + n for n in os.listdir("/"))
+                  if p.startswith(SNAP_PREFIX))
+
+
+def drop_snapshots(keep=None):
+    for s in snapshots():
+        if s != keep:
+            subprocess.run(["btrfs", "subvolume", "delete", s],
+                           capture_output=True)
+
+
+def take_snapshot(build_id):
+    snap = SNAP_PREFIX + build_id
+    drop_snapshots()
+    r = subprocess.run(["btrfs", "subvolume", "snapshot", "-r", "/", snap],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise OtaError("cannot snapshot the root filesystem: "
+                       + (r.stderr or r.stdout).strip())
+    return snap
+
+
+def backup_boot(entries, dels, dest):
+    if os.path.exists(dest):
+        shutil.rmtree(dest)
+    os.makedirs(dest)
+    saved = []
+    for e in [x for _, x in entries] + [x for _, x in dels]:
+        if e["part"] != "boot":
+            continue
+        p = target(e)
+        if os.path.isfile(p):
+            b = os.path.join(dest, e["path"])
+            os.makedirs(os.path.dirname(b), exist_ok=True)
+            shutil.copy2(p, b)
+            saved.append(e["path"])
+    return saved
+
+
+def restore(state):
+    """Put back what an update changed: root files from the snapshot, boot
+    files from the copy taken before, new files removed."""
+    snap = state["snapshot"]
+    if not os.path.isdir(snap):
+        raise OtaError("the snapshot %s is gone; nothing to restore from" % snap)
+    # files a hook merged into (hooks/all-merge-dpkg.sh lists them), changed
+    # after everything in the journal
+    try:
+        merged = [("replaced", p) for p in open(MERGED_LIST).read().split("\n") if p]
+    except OSError:
+        merged = []
+    for kind, p in merged + list(reversed(state.get("journal", []))):
+        try:
+            if p.startswith("/boot/"):
+                rel = p[len("/boot/"):]
+                b = os.path.join(state["boot_backup"], rel)
+                if os.path.isfile(b):
+                    tmp = os.path.join(os.path.dirname(p), ".ota-tmp." + os.path.basename(p))
+                    shutil.copyfile(b, tmp)
+                    os.replace(tmp, p)
+                elif kind == "created" and os.path.lexists(p):
+                    os.unlink(p)
+                continue
+            src = snap + p
+            if os.path.lexists(src):
+                if os.path.isdir(src) and not os.path.islink(src):
+                    if os.path.lexists(p) and not os.path.isdir(p):
+                        os.unlink(p)
+                    if not os.path.isdir(p):
+                        subprocess.run(["cp", "-a", "--reflink=auto", src, p],
+                                       check=True)
+                    continue
+                tmp = os.path.join(os.path.dirname(p), ".ota-tmp." + os.path.basename(p))
+                if os.path.lexists(tmp):
+                    os.unlink(tmp)
+                subprocess.run(["cp", "-a", "--reflink=auto", src, tmp], check=True)
+                if os.path.isdir(p) and not os.path.islink(p):
+                    shutil.rmtree(p)
+                os.replace(tmp, p)
+            elif os.path.lexists(p):
+                if os.path.isdir(p) and not os.path.islink(p):
+                    shutil.rmtree(p)
+                else:
+                    os.unlink(p)
+        except OSError as ex:
+            log("restore: %s: %s" % (p, ex))
+    if state.get("uboot_backup") and os.path.exists(state["uboot_backup"]):
+        write_uboot(state["uboot_backup"], state["uboot_part"])
+    subprocess.run(["sync"])
+
+
+def write_uboot(img, part):
+    with open(img, "rb") as f:
+        data = f.read()
+    with open(part, "r+b") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    with open(part, "rb") as f:
+        if f.read(len(data)) != data:
+            raise OtaError("the boot loader did not read back as written")
+
+
+def save_state(st):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    tmp = os.path.join(STATE_DIR, ".state.json")
+    with open(tmp, "w") as f:
+        json.dump(st, f, indent=1)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, os.path.join(STATE_DIR, "state.json"))
+
+
+def load_state():
+    try:
+        return json.load(open(os.path.join(STATE_DIR, "state.json")))
+    except (OSError, ValueError):
+        return {}
+
+
+# ---------------------------------------------------------------- install
+
+def install(pkg, assume_yes=False):
+    if os.geteuid() != 0:
+        raise OtaError("run as root")
+    rel = release()
+    m = read_manifest(pkg)
+    if m.get("device") != rel.get("DEVICE", "rg52mini"):
+        raise OtaError("the package is for %s" % m.get("device"))
+    if m.get("from_build_id") != rel["BUILD_ID"]:
+        raise OtaError("the package updates build %s (%s), this is %s (%s)"
+                       % (m.get("from_build_id"), m.get("from_version"),
+                          rel["BUILD_ID"], rel.get("VERSION")))
+    ok, cap = battery_ok(m.get("min_battery", 20))
+    if not ok:
+        raise OtaError("charge the battery to %d%% or connect the charger "
+                       "(now %s%%)" % (m.get("min_battery", 20), cap))
+    st = load_state()
+    if st.get("status") == "applying":
+        raise OtaError("a previous update was interrupted; run "
+                       "'darkos-ota rollback' first")
+
+    log("update %s (%s) -> %s (%s)" % (rel.get("VERSION"), rel["BUILD_ID"],
+                                      m["version"], m["build_id"]))
+    stage = os.path.join(WORK_DIR, "stage")
+    if free_bytes("/") < m.get("root_bytes", 0) + (300 << 20):
+        raise OtaError("not enough space on the root filesystem")
+    if free_bytes("/boot") < m.get("boot_bytes", 0) + (1 << 20):
+        raise OtaError("not enough space on the boot partition (%d MiB free, "
+                       "%d MiB needed)" % (free_bytes("/boot") >> 20,
+                                            (m.get("boot_bytes", 0) >> 20) + 1))
+    uboot = m.get("uboot")
+    uboot_part = None
+    if uboot:
+        if is_dualboot():
+            log("boot loader: dual-boot card, it belongs to GammaOS - not touched")
+            uboot = None
+        else:
+            uboot_part = uboot_partition()
+            with open(uboot_part, "rb") as f:
+                cur = hashlib.sha256(f.read(uboot["size"])).hexdigest()
+            if cur == uboot["sha256"]:
+                uboot = None
+            elif cur != uboot["old_sha256"]:
+                log("boot loader: differs from the one of %s (installed by hand, "
+                    "e.g. the DDR 928 MHz one) - not touched" % m["from_version"])
+                uboot = None
+
+    snap = take_snapshot(rel["BUILD_ID"])
+    log("snapshot " + snap)
+    if os.path.exists(MERGED_LIST):
+        os.unlink(MERGED_LIST)
+    log("checking the package")
+    try:
+        verify_payload(pkg, m, stage)
+    except Exception:
+        shutil.rmtree(stage, ignore_errors=True)
+        drop_snapshots()
+        raise
+    files, dels = plan(m)
+    n = {k: sum(1 for a, _ in files if a == k) for k in
+         ("apply", "skip", "keep", "force", "protected")}
+    log("files: %(apply)d to write, %(skip)d already new, %(keep)d changed by "
+        "the user (kept, new beside as .ota-new), %(force)d system files changed "
+        "by hand (overwritten), %(protected)d of the dual-boot builder (kept)" % n)
+    for a, e in files:
+        if a in ("keep", "force"):
+            log("  %s: /%s" % (a, e["path"]))
+
+    bb = os.path.join(STATE_DIR, "boot-backup")
+    backup_boot([x for x in files if x[0] in ("apply", "force")], dels, bb)
+    state = {"status": "applying", "from_build_id": rel["BUILD_ID"],
+             "from_version": rel.get("VERSION"), "to_build_id": m["build_id"],
+             "to_version": m["version"], "snapshot": snap, "boot_backup": bb,
+             "journal": [], "time": int(time.time())}
+    if uboot:
+        ub = os.path.join(STATE_DIR, "uboot-backup.img")
+        with open(uboot_part, "rb") as f, open(ub, "wb") as o:
+            o.write(f.read(uboot["size"]))
+        state["uboot_backup"], state["uboot_part"] = ub, uboot_part
+    save_state(state)
+
+    journal = state["journal"]
+    try:
+        # directories first, files of the root, then the boot partition last:
+        # an update cut short leaves the old kernel with a consistent root
+        order = sorted((x for x in files if x[0] in ("apply", "force", "keep")),
+                       key=lambda x: (x[1]["part"] == "boot", x[1]["type"] != "dir",
+                                      x[1]["path"]))
+        for i, (a, e) in enumerate(order):
+            put(e, stage, journal, beside=(a == "keep"))
+            if i % 200 == 0:
+                save_state(state)
+                print("PROGRESS %d" % (i * 100 // max(1, len(order))), flush=True)
+        for a, e in sorted(dels, key=lambda x: x[1]["path"], reverse=True):
+            if a == "apply":
+                remove(e, journal)
+        save_state(state)
+        # packages do not carry /etc/ld.so.cache: make it for the new libraries
+        subprocess.run(["ldconfig"])
+        subprocess.run(["sync"])
+        if uboot:
+            log("writing the boot loader to " + uboot_part)
+            write_uboot(os.path.join(stage, "uboot.img"), uboot_part)
+        for h in m.get("hooks", []):
+            log("hook " + h)
+            env = dict(os.environ, OTA_FROM=rel.get("VERSION", ""),
+                       OTA_TO=m["version"], OTA_DUALBOOT="1" if is_dualboot() else "0")
+            subprocess.run(["bash", os.path.join(stage, h)], check=True, env=env)
+        subprocess.run(["sync"])
+    except Exception as ex:
+        log("FAILED: %s - restoring" % ex)
+        save_state(state)
+        restore(state)
+        state["status"] = "failed"
+        save_state(state)
+        raise OtaError("the update failed and was undone: %s" % ex)
+
+    state["status"] = "applied"
+    save_state(state)
+    shutil.rmtree(stage, ignore_errors=True)
+    log("done: %s; reboot to finish" % m["version"])
+    return m
+
+
+def cmd_rollback():
+    st = load_state()
+    if st.get("status") not in ("applying", "applied", "booted", "failed"):
+        raise OtaError("no update to roll back")
+    log("rolling back to %s (%s)" % (st.get("from_version"), st.get("from_build_id")))
+    restore(st)
+    st["status"] = "rolled-back"
+    save_state(st)
+    log("rolled back; reboot")
+
+
+def cmd_boot_ok():
+    """At boot: an applied update is confirmed by the system having come up
+    on it."""
+    st = load_state()
+    if st.get("status") != "applied":
+        return
+    rel = read_kv(RELEASE_FILE)
+    if rel.get("BUILD_ID") == st.get("to_build_id"):
+        st["status"] = "booted"
+        log("booted %s" % st.get("to_version"))
+    save_state(st)
+
+
+def main():
+    # sudo keeps the caller's PATH here (sudoers.d/ark-no-secure-path), and
+    # ark's has no sbin: blkid, ldconfig. Hooks get this one too.
+    os.environ["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    ap = argparse.ArgumentParser(prog="darkos-ota")
+    ap.add_argument("--feed")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("version")
+    sub.add_parser("check")
+    sub.add_parser("local")
+    sub.add_parser("update")
+    p = sub.add_parser("install")
+    p.add_argument("package")
+    sub.add_parser("rollback")
+    sub.add_parser("status")
+    sub.add_parser("boot-ok")
+    sub.add_parser("clean")
+    a = ap.parse_args()
+    try:
+        if a.cmd == "version":
+            r = read_kv(RELEASE_FILE)
+            print("%s %s" % (r.get("VERSION", "?"), r.get("BUILD_ID", "?")))
+        elif a.cmd == "check":
+            e = check(a.feed)
+            print(json.dumps(e) if e else "none")
+        elif a.cmd == "local":
+            for p_, m in local_packages():
+                print("%s\t%s\t%s" % (p_, m["version"], m["build_id"]))
+        elif a.cmd == "update":
+            e = check(a.feed)
+            if not e:
+                print("none")
+                return 0
+            install(download(e))
+        elif a.cmd == "install":
+            install(a.package)
+        elif a.cmd == "rollback":
+            cmd_rollback()
+        elif a.cmd == "status":
+            st = load_state()
+            st.pop("journal", None)
+            print(json.dumps(st, indent=1))
+            print("snapshots: %s" % " ".join(snapshots()))
+        elif a.cmd == "boot-ok":
+            cmd_boot_ok()
+        elif a.cmd == "clean":
+            shutil.rmtree(WORK_DIR, ignore_errors=True)
+            if load_state().get("status") in ("booted", "rolled-back", "failed"):
+                drop_snapshots()
+    except OtaError as ex:
+        log("ERROR: %s" % ex)
+        return 2
+    except Exception as ex:
+        log("ERROR: %s: %s" % (type(ex).__name__, ex))
+        return 3
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -144,7 +144,7 @@ clean:
 	sudo rm -rf Arkbuild Arkbuild32 Arkbuild-final arkos_* main mnt odroidgoA-4.4.y ArkOS_* rg351 wget-*
 	# Remove stale kernel .config so defconfig is regenerated on next build
 	rm -f kernel_rk3562/.config
-	while losetup -a | grep -m 1 ArkOS; do sudo losetup -d "$$(losetup -a | grep ArkOS | cut -d ':' -f 1)"; done
+	for devlo in $$(losetup -a | grep -F "($$(pwd)/" | cut -d ':' -f 1); do sudo losetup -d "$$devlo" || echo "Skipping $$devlo (still in use)"; done
 	@echo "Done!"
 
 clean_devenv:

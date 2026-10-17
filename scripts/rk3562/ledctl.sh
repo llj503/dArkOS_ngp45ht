@@ -59,7 +59,14 @@ init_byte() {
 	echo $((0x20 + LEDCOUNT / 4 - 1))
 }
 
-pwr() { [ -w "$LED_PWR" ] && printf '%s' "$1" > "$LED_PWR" 2>/dev/null; }
+# Only on a change: written "0" when the rail is already off, the knob disables
+# the regulator once more and the kernel warns ("unbalanced disables for
+# vcc-led", with a stack trace) - on every suspend and wake with the lights off.
+pwr() {
+	[ -w "$LED_PWR" ] || return
+	[ "$(cat "$LED_PWR" 2>/dev/null)" = "$1" ] && return
+	printf '%s' "$1" > "$LED_PWR" 2>/dev/null
+}
 
 # Open the controller UART once on fd 9, write-only, CLOCAL, raw.
 open_uart() {
@@ -98,6 +105,8 @@ light_on() {
 }
 
 light_off() {
+	# rail already off: the controller is unpowered and nothing is lit
+	[ "$(cat "$LED_PWR" 2>/dev/null)" = "0" ] && return
 	open_uart || { pwr 0; return; }
 	send 9              # chgmode 9 = OFF
 	close_uart

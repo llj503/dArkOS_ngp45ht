@@ -1,0 +1,10 @@
+[Unit]
+Description=PortMaster: keep SDL_GAMECONTROLLERCONFIG under the kernel's 128 KB limit
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/portmaster-e2big.sh
+
+[Install]
+WantedBy=multi-user.target

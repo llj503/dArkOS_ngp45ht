@@ -1,6 +1,6 @@
 #!/bin/bash
 
-bton=$(sudo systemctl status bluetooth | grep "disabled")
+bton=$(sudo systemctl status bluetooth | grep "disabled;")
 
 if [ -z "$bton" ]
 then

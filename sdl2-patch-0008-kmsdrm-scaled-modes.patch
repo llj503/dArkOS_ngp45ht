@@ -1,0 +1,327 @@
+KMSDRM: scaled fullscreen modes on the rotated DSI panel
+
+Games that set their own video mode (dhewm3's r_mode, many ports) could
+only get the panel's one mode. On top of the RGA rotation patch, offer
+960x540, 854x480, 800x600, 640x480 and 640x360 as well: in exclusive
+fullscreen the GBM surface gets that size, SDL reports it, and the RGA
+pass that already rotates every frame scales it onto the panel, keeping
+the aspect ratio (black bars for 4:3). The panel's mode does not change.
+SDL_KMSDRM_SCALED_MODES=0 leaves the modes out.
+
+--- a/src/video/kmsdrm/SDL_kmsdrmopengles.c	2026-10-07 21:12:21.195644294 +0300
++++ b/src/video/kmsdrm/SDL_kmsdrmopengles.c	2026-10-07 21:12:21.207640474 +0300
+@@ -159,6 +159,9 @@
+             close(src_info.fd);
+         }
+         src_info.fd = KMSDRM_gbm_bo_get_fd(windata->next_bo);
++        /* the row length of this buffer, which for a scaled mode such as
++           854x480 is not its width */
++        src_info.rect.wstride = KMSDRM_gbm_bo_get_stride(windata->next_bo) / 4;
+         dst_info.fd = viddata->rga_buffer_prime_fds[viddata->rga_buffer_index];
+         if (c_RkRgaBlit(&src_info, &dst_info, NULL) < 0) {
+             SDL_LogError(SDL_LOG_CATEGORY_VIDEO,
+--- a/src/video/kmsdrm/SDL_kmsdrmvideo.c	2026-10-07 21:12:21.195644294 +0300
++++ b/src/video/kmsdrm/SDL_kmsdrmvideo.c	2026-10-07 21:12:21.207640474 +0300
+@@ -337,6 +337,58 @@
+     SDL_free(fb_info);
+ }
+ 
++/* Scaled modes: the RGA pass that rotates each frame onto the portrait panel
++   scales it as well. The source rectangle is the GBM surface (landscape, the
++   size the app asked for); the destination is the part of the panel it fills,
++   keeping the aspect ratio, so a 4:3 mode gets black bars at the sides. With
++   ROT_90 a landscape x offset becomes a portrait y offset; the picture is
++   centred, so the direction of the turn does not matter. */
++static void
++KMSDRM_UpdateRotateRects(_THIS)
++{
++    SDL_VideoData *viddata = ((SDL_VideoData *)_this->driverdata);
++    int pw = viddata->rga_panel_w, ph = viddata->rga_panel_h;
++    int sw = viddata->rga_src_w, sh = viddata->rga_src_h;
++    int tw, th, i;
++
++    if (!pw || !ph || !sw || !sh) {
++        return;
++    }
++    if ((long)sw * ph >= (long)sh * pw) {
++        tw = pw;
++        th = (int)(((long)pw * sh / sw) & ~1L);
++    } else {
++        th = ph;
++        tw = (int)(((long)ph * sw / sh) & ~1L);
++    }
++    if (ph - th < 4) {
++        th = ph;  /* 854x480 and the like: within a few lines, fill */
++    }
++    if (pw - tw < 4) {
++        tw = pw;
++    }
++
++    /* the stride is set per frame from the buffer itself */
++    rga_set_rect(&src_info.rect, 0, 0, sw, sh, sw, sh, RK_FORMAT_BGRA_8888);
++    rga_set_rect(&dst_info.rect, (ph - th) / 2, (pw - tw) / 2, th, tw, ph, pw, RK_FORMAT_BGRA_8888);
++
++    /* black bars: the blit never writes outside its rectangle, so clear the
++       scanout buffers once whenever the picture does not fill the panel */
++    if (tw != pw || th != ph) {
++        for (i = 0; i < RGA_BUFFERS_MAX; ++i) {
++            rga_info_t fill;
++            SDL_zero(fill);
++            fill.fd = viddata->rga_buffer_prime_fds[i];
++            fill.mmuFlag = 1;
++            fill.color = 0xff000000;
++            rga_set_rect(&fill.rect, 0, 0, ph, pw, ph, pw, RK_FORMAT_BGRA_8888);
++            if (fill.fd > 0 && c_RkRgaColorFill(&fill) < 0) {
++                SDL_LogError(SDL_LOG_CATEGORY_VIDEO, "Failed to clear the RGA buffer");
++            }
++        }
++    }
++}
++
+ static void
+ KMSDRM_InitRotateBuffer(_THIS, int frameWidth, int frameHeight)
+ {
+@@ -375,6 +427,16 @@
+     dst_info.mmuFlag = 1;
+ 
+     rga_set_rect(&dst_info.rect, 0, 0, frameWidth, frameHeight, frameWidth, frameHeight, RK_FORMAT_BGRA_8888);
++
++    /* The surface may already have a scaled size (CreateSurfaces runs before
++       this on window creation). */
++    viddata->rga_panel_w = frameHeight;
++    viddata->rga_panel_h = frameWidth;
++    if (!viddata->rga_src_w) {
++        viddata->rga_src_w = frameHeight;
++        viddata->rga_src_h = frameWidth;
++    }
++    KMSDRM_UpdateRotateRects(_this);
+ }
+ 
+ KMSDRM_FBInfo *KMSDRM_FBFromBO(_THIS, struct gbm_bo *bo)
+@@ -545,9 +607,20 @@
+    available on the DRM connector of the display.
+    We use the SDL mode list (which we filled in KMSDRM_GetDisplayModes)
+    because it's ordered, while the list on the connector is mostly random.*/
++static drmModeModeInfo *KMSDRM_GetClosestDisplayModeScaled(SDL_VideoDisplay *display,
++                                                           uint32_t width, uint32_t height, uint32_t refresh_rate,
++                                                           int *scaled_w, int *scaled_h);
++
+ static drmModeModeInfo *KMSDRM_GetClosestDisplayMode(SDL_VideoDisplay *display,
+                                                      uint32_t width, uint32_t height, uint32_t refresh_rate)
+ {
++    return KMSDRM_GetClosestDisplayModeScaled(display, width, height, refresh_rate, NULL, NULL);
++}
++
++static drmModeModeInfo *KMSDRM_GetClosestDisplayModeScaled(SDL_VideoDisplay *display,
++                                                           uint32_t width, uint32_t height, uint32_t refresh_rate,
++                                                           int *scaled_w, int *scaled_h)
++{
+ 
+     SDL_DisplayData *dispdata = (SDL_DisplayData *)display->driverdata;
+     drmModeConnector *connector = dispdata->connector;
+@@ -566,6 +639,10 @@
+     } else {
+         SDL_DisplayModeData *modedata = (SDL_DisplayModeData *)closest.driverdata;
+         drm_mode = &connector->modes[modedata->mode_index];
++        if (scaled_w && scaled_h) {
++            *scaled_w = modedata->scaled_w;
++            *scaled_h = modedata->scaled_h;
++        }
+         return drm_mode;
+     }
+ }
+@@ -1258,6 +1335,23 @@
+     }
+ }
+ 
++static void KMSDRM_GetSurfaceSize(SDL_Window *window, const drmModeModeInfo *mode, int *w, int *h)
++{
++    SDL_DisplayData *dispdata = (SDL_DisplayData *)SDL_GetDisplayForWindow(window)->driverdata;
++
++    if ((window->flags & SDL_WINDOW_FULLSCREEN) == SDL_WINDOW_FULLSCREEN &&
++        dispdata->fullscreen_scaled_w && dispdata->fullscreen_scaled_h) {
++        *w = dispdata->fullscreen_scaled_w;
++        *h = dispdata->fullscreen_scaled_h;
++    } else if (dispdata->connector->connector_type == DRM_MODE_CONNECTOR_DSI) {
++        *w = mode->vdisplay;
++        *h = mode->hdisplay;
++    } else {
++        *w = mode->hdisplay;
++        *h = mode->vdisplay;
++    }
++}
++
+ static void KMSDRM_DirtySurfaces(SDL_Window *window)
+ {
+     SDL_WindowData *windata = (SDL_WindowData *)window->driverdata;
+@@ -1272,12 +1366,9 @@
+        recreation is deferred */
+     KMSDRM_GetModeToSet(window, &mode);
+     {
+-        SDL_DisplayData *dispdata = (SDL_DisplayData *)SDL_GetDisplayForWindow(window)->driverdata;
+-        if (dispdata->connector->connector_type == DRM_MODE_CONNECTOR_DSI) {
+-            SDL_SendWindowEvent(window, SDL_WINDOWEVENT_RESIZED, mode.vdisplay, mode.hdisplay);
+-        } else {
+-            SDL_SendWindowEvent(window, SDL_WINDOWEVENT_RESIZED, mode.hdisplay, mode.vdisplay);
+-        }
++        int w, h;
++        KMSDRM_GetSurfaceSize(window, &mode, &w, &h);
++        SDL_SendWindowEvent(window, SDL_WINDOWEVENT_RESIZED, w, h);
+     }
+ }
+ 
+@@ -1296,6 +1387,7 @@
+     EGLContext egl_context;
+ 
+     int ret = 0;
++    int surface_w, surface_h;
+ 
+     /* If the current window already has surfaces, destroy them before creating other. */
+     if (windata->gs) {
+@@ -1312,25 +1404,22 @@
+        SDL_video.c expects. Hulk-smash the display's current_mode to keep the
+        mode that's set in sync with what SDL_video.c thinks is set */
+     KMSDRM_GetModeToSet(window, &dispdata->mode);
++    KMSDRM_GetSurfaceSize(window, &dispdata->mode, &surface_w, &surface_h);
+ 
+-    if (dispdata->connector->connector_type == DRM_MODE_CONNECTOR_DSI) {
+-        display->current_mode.w = dispdata->mode.vdisplay;
+-        display->current_mode.h = dispdata->mode.hdisplay;
+-    } else {
+-        display->current_mode.w = dispdata->mode.hdisplay;
+-        display->current_mode.h = dispdata->mode.vdisplay;
+-    }
++    display->current_mode.w = surface_w;
++    display->current_mode.h = surface_h;
+     display->current_mode.refresh_rate = dispdata->mode.vrefresh;
+     display->current_mode.format = SDL_PIXELFORMAT_ARGB8888;
+ 
+-    if (dispdata->connector->connector_type == DRM_MODE_CONNECTOR_DSI) {
+-        windata->gs = KMSDRM_gbm_surface_create(viddata->gbm_dev,
+-                                                dispdata->mode.vdisplay, dispdata->mode.hdisplay,
+-                                                surface_fmt, surface_flags);
+-    } else {
+-        windata->gs = KMSDRM_gbm_surface_create(viddata->gbm_dev,
+-                                                dispdata->mode.hdisplay, dispdata->mode.vdisplay,
+-                                                surface_fmt, surface_flags);
++    windata->gs = KMSDRM_gbm_surface_create(viddata->gbm_dev,
++                                            surface_w, surface_h,
++                                            surface_fmt, surface_flags);
++
++    /* The RGA pass reads this surface: scale from its size from now on. */
++    viddata->rga_src_w = surface_w;
++    viddata->rga_src_h = surface_h;
++    if (viddata->rga_rotation_active) {
++        KMSDRM_UpdateRotateRects(_this);
+     }
+ 
+     if (!windata->gs) {
+@@ -1353,13 +1442,7 @@
+     egl_context = (EGLContext)SDL_GL_GetCurrentContext();
+     ret = SDL_EGL_MakeCurrent(_this, windata->egl_surface, egl_context);
+ 
+-    if (dispdata->connector->connector_type == DRM_MODE_CONNECTOR_DSI) {
+-        SDL_SendWindowEvent(window, SDL_WINDOWEVENT_RESIZED,
+-                            dispdata->mode.vdisplay, dispdata->mode.hdisplay);
+-    } else {
+-        SDL_SendWindowEvent(window, SDL_WINDOWEVENT_RESIZED,
+-                            dispdata->mode.hdisplay, dispdata->mode.vdisplay);
+-    }
++    SDL_SendWindowEvent(window, SDL_WINDOWEVENT_RESIZED, surface_w, surface_h);
+ 
+     windata->egl_surface_dirty = SDL_FALSE;
+ 
+@@ -1509,6 +1592,39 @@
+         if (!SDL_AddDisplayMode(display, &mode)) {
+             SDL_free(modedata);
+         }
++
++        /* Scaled modes: smaller sizes for games that set their own video
++           mode to render fewer pixels. The panel stays in its one mode; the
++           RGA pass that rotates every frame also scales it (with bars for
++           4:3). Only with the RGA rotation, so only on a DSI panel.
++           SDL_KMSDRM_SCALED_MODES=0 leaves them out. */
++        if (conn->connector_type == DRM_MODE_CONNECTOR_DSI &&
++            SDL_GetHintBoolean("SDL_KMSDRM_SCALED_MODES", SDL_TRUE)) {
++            static const int scaled[][2] = {
++                { 960, 540 }, { 854, 480 }, { 800, 600 }, { 640, 480 }, { 640, 360 }
++            };
++            int s;
++            for (s = 0; s < (int)SDL_arraysize(scaled); s++) {
++                SDL_DisplayMode smode = mode;
++                SDL_DisplayModeData *smodedata;
++                if (scaled[s][0] >= mode.w || scaled[s][1] >= mode.h) {
++                    continue;
++                }
++                smodedata = SDL_calloc(1, sizeof(SDL_DisplayModeData));
++                if (!smodedata) {
++                    break;
++                }
++                smodedata->mode_index = i;
++                smodedata->scaled_w = scaled[s][0];
++                smodedata->scaled_h = scaled[s][1];
++                smode.w = scaled[s][0];
++                smode.h = scaled[s][1];
++                smode.driverdata = smodedata;
++                if (!SDL_AddDisplayMode(display, &smode)) {
++                    SDL_free(smodedata);
++                }
++            }
++        }
+     }
+ }
+ 
+@@ -1535,6 +1651,8 @@
+     /* Take note of the new mode to be set, and leave the CRTC modeset pending
+        so it's done in SwapWindow. */
+     dispdata->fullscreen_mode = conn->modes[modedata->mode_index];
++    dispdata->fullscreen_scaled_w = modedata->scaled_w;
++    dispdata->fullscreen_scaled_h = modedata->scaled_h;
+ 
+     for (i = 0; i < viddata->num_windows; i++) {
+         KMSDRM_DirtySurfaces(viddata->windows[i]);
+@@ -1722,8 +1840,11 @@
+            are considered "windowed" at this point of their life.
+            If a window is fullscreen, SDL internals will call
+            KMSDRM_SetWindowFullscreen() to reconfigure it if necessary. */
+-        mode = KMSDRM_GetClosestDisplayMode(display,
+-                                            window->windowed.w, window->windowed.h, 0);
++        dispdata->fullscreen_scaled_w = dispdata->fullscreen_scaled_h = 0;
++        mode = KMSDRM_GetClosestDisplayModeScaled(display,
++                                                  window->windowed.w, window->windowed.h, 0,
++                                                  &dispdata->fullscreen_scaled_w,
++                                                  &dispdata->fullscreen_scaled_h);
+ 
+         if (mode) {
+             dispdata->fullscreen_mode = *mode;
+--- a/src/video/kmsdrm/SDL_kmsdrmvideo.h	2026-10-07 21:12:21.195644294 +0300
++++ b/src/video/kmsdrm/SDL_kmsdrmvideo.h	2026-10-07 21:12:21.199643021 +0300
+@@ -100,12 +100,19 @@
+     int rga_buffer_prime_fds[RGA_BUFFERS_MAX];
+     int rga_buffer_index;
+     SDL_bool rga_rotation_active;
++    /* Landscape size of the GBM surface the RGA reads, and of the panel. */
++    int rga_src_w, rga_src_h;
++    int rga_panel_w, rga_panel_h;
+ 
+ } SDL_VideoData;
+ 
+ typedef struct SDL_DisplayModeData
+ {
+     int mode_index;
++    /* Scaled modes (portrait DSI panel, RGA rotation): the size the app
++       renders at, scaled to the panel by the RGA pass that rotates every
++       frame. 0 for the panel's own modes. */
++    int scaled_w, scaled_h;
+ } SDL_DisplayModeData;
+ 
+ typedef struct SDL_DisplayData
+@@ -115,6 +122,8 @@
+     drmModeModeInfo mode;
+     drmModeModeInfo original_mode;
+     drmModeModeInfo fullscreen_mode;
++    /* The scaled size that goes with fullscreen_mode, 0 for none. */
++    int fullscreen_scaled_w, fullscreen_scaled_h;
+ 
+     drmModeCrtc *saved_crtc; /* CRTC to restore on quit */
+     SDL_bool saved_vrr;

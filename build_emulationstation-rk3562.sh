@@ -12,7 +12,12 @@ echo "export devpass=$(printenv DEV_PASS)" | sudo tee -a Arkbuild/home/ark/ES_VA
 echo "export apikey=$(printenv TGDB_APIKEY)" | sudo tee -a Arkbuild/home/ark/ES_VARIABLES.txt
 echo "export softname=\"dArkOS-${UNIT}\"" | sudo tee -a Arkbuild/home/ark/ES_VARIABLES.txt
 
-if [ -f "Arkbuild_package_cache/${CHIPSET}/emulationstation.tar.gz" ] && [ "$(cat Arkbuild_package_cache/${CHIPSET}/emulationstation.commit)" == "$(curl -s https://api.github.com/repos/christianhaitian/EmulationStation-fcamod/commits/503noTTS | jq -r '.sha')" ]; then
+# ES lists the emulator governors from a fixed list in SystemData.h. RG52 Mini
+# adds "overclock" after performance (scripts/perfoc, run by perfmax); the
+# "_oc" in the cache key keeps a cached ES without it out.
+ES_GOV_OLD='{"performance", "ondemand", "powersave"}'
+ES_GOV_NEW='{"performance", "overclock", "ondemand", "powersave"}'
+if [ -f "Arkbuild_package_cache/${CHIPSET}/emulationstation.tar.gz" ] && [ "$(cat Arkbuild_package_cache/${CHIPSET}/emulationstation.commit)" == "$(curl -s https://api.github.com/repos/christianhaitian/EmulationStation-fcamod/commits/503noTTS | jq -r '.sha')_oc" ]; then
     sudo tar -xvzpf Arkbuild_package_cache/${CHIPSET}/emulationstation.tar.gz
     sudo rm Arkbuild/home/ark/ES_VARIABLES.txt
 else
@@ -23,6 +28,9 @@ else
       git clone --recursive --depth=1 https://github.com/christianhaitian/EmulationStation-fcamod -b 503noTTS &&
       cd EmulationStation-fcamod &&
       git submodule update --init &&
+      grep -qF '${ES_GOV_OLD}' es-app/src/SystemData.h &&
+      sed -i 's/${ES_GOV_OLD}/${ES_GOV_NEW}/' es-app/src/SystemData.h &&
+      grep -qF '${ES_GOV_NEW}' es-app/src/SystemData.h &&
       cmake -DSCREENSCRAPER_DEV_LOGIN=\"devid=\$devid&devpassword=\$devpass\" -DGAMESDB_APIKEY=\"\$apikey\" -DSCREENSCRAPER_SOFTNAME=\"\$softname\" . &&
       make -j\$(nproc) &&
       mkdir -pv /usr/bin/emulationstation &&
@@ -37,7 +45,7 @@ else
       sudo rm -f Arkbuild_package_cache/${CHIPSET}/emulationstation.commit
     fi
     sudo tar -czpf Arkbuild_package_cache/${CHIPSET}/emulationstation.tar.gz Arkbuild/usr/bin/emulationstation/
-    sudo git --git-dir=Arkbuild/home/ark/EmulationStation-fcamod/.git --work-tree=Arkbuild/home/ark/EmulationStation-fcamod rev-parse HEAD > Arkbuild_package_cache/${CHIPSET}/emulationstation.commit
+    sudo git --git-dir=Arkbuild/home/ark/EmulationStation-fcamod/.git --work-tree=Arkbuild/home/ark/EmulationStation-fcamod rev-parse HEAD | sed 's/$/_oc/' | sudo tee Arkbuild_package_cache/${CHIPSET}/emulationstation.commit > /dev/null
 fi
 
 # RK3562: ES runs on the system Mali (g29p1) like every other app. No DT_RPATH
@@ -109,6 +117,7 @@ sudo cp Emulationstation/fonts/* Arkbuild/usr/bin/emulationstation/resources/
 sudo mkdir -p Arkbuild/usr/share/fonts/truetype/droid/
 sudo wget -t 5 -T 30 --no-check-certificate https://github.com/aosp-mirror/platform_frameworks_base/raw/refs/heads/main/data/fonts/DroidSansFallbackFull.ttf -O Arkbuild/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf
 sudo cp -R Emulationstation/scripts/ Arkbuild/home/ark/.emulationstation/
+sudo cp -R Emulationstation/scripts.rk3562/. Arkbuild/home/ark/.emulationstation/scripts/
 sudo chmod -R 777 Arkbuild/home/ark/.emulationstation/scripts/*
 call_chroot "chown -R ark:ark /etc/emulationstation/"
 call_chroot "chown -R ark:ark /home/ark/"

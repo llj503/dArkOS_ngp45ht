@@ -18,7 +18,7 @@ After=bluetooth.service
 Type=dbus
 BusName=org.bluealsa
 User=root
-ExecStart=/usr/bin/bluealsa -S -p a2dp-source -p a2dp-sink
+ExecStart=/usr/bin/bluealsad -S -p a2dp-source -p a2dp-sink
 Restart=on-failure
 
 # Sandboxing

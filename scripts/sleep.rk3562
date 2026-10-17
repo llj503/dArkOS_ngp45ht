@@ -4,10 +4,27 @@
 # Handles suspend/resume for RK817 PMIC and peripherals
 #
 
+# The way down takes a few seconds, with the screen dark from the start. A
+# press of the power key in that time (pause.sh) used to be lost, and the
+# system went to sleep anyway, so waking it took a second press. pause.sh
+# reads the phase from this file: on the way down a press asks to come back,
+# which the RTC alarm does right after the system is asleep.
+PHASE=/run/darkos-sleep.phase
+WAKE=/run/darkos-sleep.wake
+RTC_ALARM=/sys/class/rtc/rtc0/wakealarm
+
 case $1 in
    pre)
-    # Save current brightness and turn off backlight
-    echo $(cat /sys/class/backlight/backlight/brightness) | sudo tee /var/local/cur_bright.state
+    echo "pre $(date +%s%3N)" > $PHASE
+    rm -f $WAKE
+
+    # Save current brightness and turn off backlight. Already off, it is the
+    # "black" screensaver of ES, and the one to save is from before it (udev
+    # keeps it, see finishing_touches-rk3562.sh): a 0 would leave the screen
+    # dark after the wake.
+    b=$(cat /sys/class/backlight/backlight/brightness)
+    [ "$b" = 0 ] && b=$(cat /run/darkos-brightness 2> /dev/null)
+    [ -n "$b" ] && [ "$b" != 0 ] && echo $b | sudo tee /var/local/cur_bright.state
     echo 0 | sudo tee /sys/class/backlight/backlight/brightness
 
     # Check if EmulationStation is using too much CPU (stuck)
@@ -50,9 +67,21 @@ case $1 in
 
     # Power down the stick-RGB LED MCU during sleep (no-op unless configured)
     [ -f /home/ark/.config/led.cfg ] && /usr/local/bin/ledctl suspend 2>/dev/null
+
+    # The power key was pressed on the way down: wake a second after.
+    echo "asleep $(date +%s%3N)" > $PHASE
+    if [ -e $WAKE ]; then
+      echo 0 > $RTC_ALARM 2>/dev/null
+      echo +1 > $RTC_ALARM 2>/dev/null
+    fi
+    exit 0
     ;;
 
    post)
+    echo "post $(date +%s%3N)" > $PHASE
+    echo 0 > $RTC_ALARM 2>/dev/null
+    rm -f $WAKE
+
     # Restore power LEDs after wake (saved state from pre-suspend)
     # Re-ensure direction is "out" — GPIO controller may reset on resume
     echo out > /sys/class/gpio/gpio96/direction 2>/dev/null
@@ -109,6 +138,7 @@ case $1 in
 
     # Restart killer daemon if active
     systemctl is-active --quiet killer_daemon && sudo systemctl restart killer_daemon
+    rm -f $PHASE
     exit 0
     ;;
 esac

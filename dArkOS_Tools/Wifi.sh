@@ -313,7 +313,10 @@ NetworkInfo() {
 
 MainMenu() {
 
-  if [[ "$(tr -d '\0' < /proc/device-tree/compatible)" == *"rk3566"* ]]; then
+  # The switch is for built-in Wi-Fi behind rfkill: the rk3566 devices, and the
+  # rk3562 ones (on the RG52 Mini the AIC8800 registers phy0 there).
+  local compat="$(tr -d '\0' < /proc/device-tree/compatible)"
+  if [[ "$compat" == *"rk3566"* || "$compat" == *"rk3562"* ]]; then
     if [[ ! -z $(rfkill -n -o TYPE,SOFT | grep wlan | grep -w unblocked) ]]; then
       local Wifi_Stat="On"
 	  local Wifi_MStat="Off"

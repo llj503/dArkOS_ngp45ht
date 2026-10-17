@@ -1,0 +1,83 @@
+#!/bin/bash
+# perfoc on|off|status - the "overclock" emulator governor (RG52 Mini, RK3562).
+#
+# on:  CPU performance at the 2208 MHz label (a turbo-mode OPP, so only with
+#      cpufreq boost on), GPU performance at the 1000 MHz label, memory
+#      performance, and the soc-thermal trips raised from 75/85 to 83/93 C.
+# off: boost off, GPU ceiling back to 900 MHz, trips back to 75/85 C. The
+#      governors themselves are left to perfmax/perfnorm.
+#
+# The labels are keys into BL31's PVTPLL table, not clocks: 2208 runs at
+# ~2135 MHz and GPU 1000 at ~960 MHz on bin L3. Both need the BL31 table
+# from the overclock bootloader and the OPPs in rk3562-rg52mini.dts; where
+# either is missing, "on" fails and perfmax falls back to performance.
+# Why 83/93: above 95 C rockchip,high-temp drops the CPU to 1800 MHz until it
+# cools below 90; the GPU has no such limit, so throttling stays on.
+# Taken over from GammaOS Next, where the mode was tested; see
+# docs/KNOWN-ISSUES.md.
+
+cpufreq=/sys/devices/system/cpu/cpufreq
+policy=$cpufreq/policy0
+gpu=""
+for d in /sys/class/devfreq/*.gpu; do [ -e "$d" ] && gpu=$d && break; done
+dmc=/sys/class/devfreq/dmc
+gpu_oc=1000000000
+gpu_cap=900000000
+
+zone=""
+for z in /sys/class/thermal/thermal_zone*; do
+	[ "$(cat "$z/type" 2>/dev/null)" = soc-thermal ] && zone=$z && break
+done
+
+# the passive (power_allocator) trips of soc-thermal: raising, the upper one
+# first; lowering, the lower one first - the kernel keeps them in order
+trips() {
+	[ -n "$zone" ] || return 0
+	local cur
+	cur=$(cat "$zone/trip_point_0_temp" 2>/dev/null) || return 0
+	if [ "$1" -gt "$cur" ]; then
+		echo "$2" > "$zone/trip_point_1_temp"
+		echo "$1" > "$zone/trip_point_0_temp"
+	else
+		echo "$1" > "$zone/trip_point_0_temp"
+		echo "$2" > "$zone/trip_point_1_temp"
+	fi
+} 2>/dev/null
+
+supported() {
+	[ -w $cpufreq/boost ] && [ -n "$gpu" ] && grep -qw $gpu_oc "$gpu/available_frequencies" 2>/dev/null
+}
+
+case "$1" in
+on)
+	supported || { echo "perfoc: no overclock steps here" >&2; exit 1; }
+	# the order matters: the kernel takes no ceiling below the floor
+	echo performance > $policy/scaling_governor
+	echo 1 > $cpufreq/boost
+	trips 83000 93000
+	cat $policy/cpuinfo_max_freq > $policy/scaling_max_freq
+	cat $policy/cpuinfo_max_freq > $policy/scaling_min_freq
+	echo performance > "$gpu/governor"
+	echo $gpu_oc > "$gpu/max_freq"
+	echo performance > $dmc/governor
+	;;
+off)
+	if [ -w $cpufreq/boost ]; then
+		echo 0 > $cpufreq/boost
+		cat $policy/cpuinfo_min_freq > $policy/scaling_min_freq
+	fi
+	[ -n "$gpu" ] && grep -qw $gpu_cap "$gpu/available_frequencies" 2>/dev/null &&
+		echo $gpu_cap > "$gpu/max_freq"
+	trips 75000 85000
+	;;
+status)
+	echo "boost $(cat $cpufreq/boost 2>/dev/null || echo -), cpu $(cat $policy/scaling_governor) $(cat $policy/scaling_min_freq)-$(cat $policy/scaling_max_freq) now $(cat $policy/scaling_cur_freq)"
+	[ -n "$gpu" ] && echo "gpu $(cat "$gpu/governor") max $(cat "$gpu/max_freq") now $(cat "$gpu/cur_freq")"
+	echo "dmc $(cat $dmc/governor 2>/dev/null) now $(cat $dmc/cur_freq 2>/dev/null)"
+	[ -n "$zone" ] && echo "trips $(cat "$zone/trip_point_0_temp")/$(cat "$zone/trip_point_1_temp"), temp $(cat "$zone/temp")"
+	;;
+*)
+	echo "usage: perfoc on|off|status" >&2
+	exit 2
+	;;
+esac

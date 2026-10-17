@@ -39,6 +39,13 @@ else
     sudo tar -cvpzf Arkbuild_package_cache/debian_${DEBIAN_CODE_NAME}_rootfs.tar.gz Arkbuild/
 fi
 
+# / is root's. The rootfs tarball cached on 13.09.2026 holds Arkbuild/ itself
+# as uid 1000, and tar -p gave that owner to the image's /: anything running
+# as ark could create files there, and PPSSPP 1.12.3 (ppsspp-2021) left a
+# /ppsspp_N.ram of its PSP memory there on each start (ota/hooks/all-fix-root-dir.sh).
+sudo chown root:root Arkbuild/
+sudo chmod 755 Arkbuild/
+
 # Bind essential host filesystems into chroot for networking
 sudo mount --bind /dev Arkbuild/dev
 sudo mount -t devpts none Arkbuild/dev/pts -o newinstance,ptmxmode=0666
