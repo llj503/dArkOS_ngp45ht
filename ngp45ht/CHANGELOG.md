@@ -37,6 +37,15 @@ dialog + gptokeyb 手柄可操作，亮度下限 5 防调黑。`install.sh` 镜�
 **收尾的旧账**：`ngp-p1-switch.sh` / `ngp-xpad-build.sh`（外接手柄抢 P1、xpad 构建）提交进 `tools/`；
 `ngp45ht_defconfig` 补上 `CONFIG_JOYSTICK_XPAD=y` + `_FF=y`（2.4G XInput 手柄，下一版镜像生效）。
 
+**镜像 `dArkOS_ngp45ht_trixie_20261017.img`（12,884,901,888 B = 12 GiB 整）**：不是从构建树重打，
+而是**从实机 TF 卡克隆**——卡上跑通的改动原生就在镜像里。做法：本机无管理员（`\\.\PhysicalDrive3`
+打不开）且 WSL 被安全策略拦截，故用卷路径 `\\.\Volume{GUID}` 原始读 p3/p4（可移动介质免提权），
+盘头 0–16 MiB（p1/p2 无卷路径）与尾部 128 MiB（含 p5 的 FAT16 "ROMS" 和备份 GPT）则从已发布的
+20261015 镜像**按 xz 块索引精确提取**（只下 38 MB + 26 KB，不必下 4.5 GB）。
+已确认原镜像与卡上 p1–p4 布局字节级一致，只有 p5 EASYROMS 首次启动被扩容（79 MiB → 46.7 GB）。
+根分区是 **btrfs**（非 ext4），超级块在 64 KiB。分区闭包校验 + `7z t` 整包解码 + 分卷重组解码三重通过。
+GitHub 单资产上限 2 GiB（实测整包被 `422 size must be less than 2147483648` 拒），故分 3 卷发布。
+
 ## 2026-10-16 · 卡上修正（没有重打镜像）
 
 都落在**现役卡**上，脚本同时进了 `tools/`；下次重建镜像一起带进去。
