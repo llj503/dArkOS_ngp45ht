@@ -59,6 +59,30 @@ for c in /home/ark/.config/retroarch/retroarch.cfg /home/ark/.config/retroarch32
 	fi
 done
 
+# --- input: PPSSPP standalone has the left stick Y flipped ------------------
+# PPSSPP keeps its own mapping in controls.ini; it has no equivalent of
+# RetroArch's signed axis, so it inherits whatever polarity the shipped file
+# assumed.  On this board the analog axes are standard (the RetroArch
+# autoconfig for rk3562-joystick binds l_y_minus_axis = "-1", i.e. up is
+# negative, and that works), so the shipped An.Up/An.Down pair is the wrong way
+# round and pushing up moves down.
+#
+# /home/ark/.config/ppsspp is only a symlink -- ppsspp.sh points it at
+# /<roms>/psp/ppsspp -- so the live file lives on the ROMS partition.  Patch the
+# /opt template too, otherwise a fresh ROMS folder just re-seeds the bug.
+# Guard is value-based, so a hand-edited mapping is never touched twice.
+for ci in /opt/ppsspp/backupforromsfolder/ppsspp/PSP/SYSTEM/controls.ini \
+		/roms/psp/ppsspp/PSP/SYSTEM/controls.ini \
+		/roms2/psp/ppsspp/PSP/SYSTEM/controls.ini \
+		/home/ark/.config/ppsspp/PSP/SYSTEM/controls.ini; do
+	[ -f "$ci" ] || continue
+	grep -q '^An\.Up *= *10-4003' "$ci" || continue
+	sed -i -e 's/^An\.Up *= *10-4003/An.Up = 10-4002/' \
+		-e 's/^An\.Down *= *10-4002/An.Down = 10-4003/' "$ci"
+	say "ppsspp controls.ini: An.Up/An.Down swapped -> $(sed -n 's/^An\.\(Up\|Down\).*/&/p' "$ci" | tr '\n' ' ') ($ci)"
+	changed=1
+done
+
 # --- build stamp ------------------------------------------------------------
 V=/home/ark/.config/.VERSION
 if [ "$(cat "$V" 2>/dev/null)" != "$DISTRO_VERSION" ]; then
