@@ -229,9 +229,21 @@ if [ -d "$SC" ] && [ -n "$(ls -A "$SC" 2>/dev/null)" ]; then
 	done
 	# NM's runtime copies keep the SSID too (no PSK, but they are still our
 	# network's fingerprints and they would be cloned as well).
+
 	rm -f /var/lib/NetworkManager/seen-bssids /var/lib/NetworkManager/timestamps 2>/dev/null
 	rm -f /var/lib/NetworkManager/*.lease 2>/dev/null
 	say "Wi-Fi profiles removed -- this device is now offline until you rejoin a network"
+fi
+
+# --- one more secret: my own dev SSH key -----------------------------------
+# /home/ark/.ssh/authorized_keys still held the ngpremote ed25519 key used for
+# remote screen/keypress injection during bring-up.  Shipping that in a public
+# image would leave a backdoor on every card flashed from it, so drop it -- but
+# only when it really is that key, so anything the owner installs later stays.
+AK=/home/ark/.ssh/authorized_keys
+if [ -f "$AK" ] && grep -q ' ngpremote$' "$AK"; then
+	rm -f "$AK" && say "removed leftover ngpremote public key from $AK"
+	changed=1
 fi
 
 if [ "$changed" = 0 ] && [ -f "$HYG" ]; then

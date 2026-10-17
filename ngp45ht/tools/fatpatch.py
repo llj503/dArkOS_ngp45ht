@@ -7,7 +7,7 @@ Usage:  python fatpatch.py list
 """
 import struct, os, sys
 
-IMG = r"F:\darkos\dArkOS_ngp45ht_trixie_20261013.img"
+IMG = os.environ.get("NGP_IMG", r"F:\darkos\dArkOS_ngp45ht_trixie_20261013.img")
 P3_OFF, P3_SIZE = 16777216, 103809024
 EOF32 = 0x0FFFFFF8
 
