@@ -1,5 +1,65 @@
 # 更新记录
 
+## 2026-10-17 · 启动速度：1m41.6s → 12.7s（去掉 90 秒 device 超时）
+
+**症状**：开机到进 ES 要 1 分 41 秒。`systemd-analyze blame` 加总只有 ~20 秒的活，
+userspace 却报 1 分 36 秒 —— 这 76 秒的差额就是**在等一个不存在的设备**，而 device 超时
+在 `blame` 里是看不见的（没有哪个 unit 在"忙"，只是没人往下走）。
+
+**根因**（`/etc/fstab` 里一行）：
+
+```
+PARTLABEL=swap none swap sw,pri=10 0 0
+```
+
+这台机器**根本没有 label 为 swap 的分区**——`/dev/disk/by-partlabel/` 下只有
+`boot dArkOS_Fat emuelec resource rootfs storage uboot`。这行是从 rg43h 的 fstab 照抄来的，
+落点在 `ngp45ht/tools/ngp-rompool.sh`（`bootstrap_rootfs` / `finishing_touches` 里那两处只在
+`UNIT == rg43h` 时才写）。systemd-fstab-generator 把它变成
+`dev-disk-by\x2dpartlabel-swap.device` 塞进 `swap.target`，而 `tmp.mount` 排在 `swap.target`
+之后，于是干等满 `DefaultDeviceTimeoutSec = 90s`。
+
+**受控 A/B 验证**（不是"改完变快了"这种弱证据）：修复后把那一行原样加回去重启测一次，
+再用脚本修掉重启测一次，两次之间只差这一行。
+
+| | kernel | userspace | 合计 | 关键链 |
+|---|---|---|---|---|
+| A：phantom swap 行**在** | 4.914s | 1m36.673s | **1m41.587s** | `tmp.mount @1min30.834s` |
+| B：脚本修掉之后 | 4.882s | 7.838s | **12.720s** | `local-fs.target @2.378s` ← `boot.mount` ← `dev-mmcblk1p3.device` |
+
+两轮 `blame` 逐项对照（ogage 3.035→3.057、welcome-message 2.693→2.343、udev-settle
+1.897→2.011、panel-restore 1.809→1.649）基本没动——**消失的 88.9 秒不属于任何一个服务**。
+A 轮 `/proc/swaps` 里 zram 是正常在用的，所以也排除"没有 swap 导致慢"。
+
+**顺带拆掉的隐患**：`ngp-panel-restore.service` 里写了 `Wants=dev-dri-card0.device`。
+`Wants=` 会让 systemd 给 device unit **真的建一个 job**，DRM 绑定一慢就是再来一个 90 秒
+（`After=` 只是排序提示，不建 job，所以它是安全的）。实测这一条当时**没有**触发
+（原始 blame 里 panel-restore 只有 2.748s：它挂在 `multi-user.target` 里，card0 早起来了），
+但属于同一类陷阱，一并去掉；原来无条件的 `ExecStartPre=/bin/sleep 2` 换成 6 秒封顶的
+`/dev/dri/card0` 轮询（30 × 0.2s），实测 2.748s → 1.649s。
+
+**swap 没有被丢掉**：那行 fstab 的本意是要 swap，只是要错了地方。改成
+`zram-swap.service`（512M / zstd / `swapon -p 10`）从内存里给——不用等任何设备，启动零成本。
+
+**新增 `ngp45ht/tools/ngp-bootspeed-fix.sh`**：幂等，可在已刷好的机器上原地修
+（`--check` 只报告不改）。它会：逐条检查 fstab 里 fstype 为 swap 的行，解析不到设备的就地
+注释掉并备份 fstab；装 zram（上游 v1.1 的 `/usr/local/sbin/zram-swap` 存在就直接用它的，
+否则装自带的 fallback unit，路径相同所以两种镜像都是 `systemctl enable zram-swap`）；
+修 panel unit；没 swap 分区时 `systemctl disable emmc-swap`（上游 v1.1 无条件 enable 它，
+这里白跑一趟还要顺带拉起 `systemd-udev-settle.service`，约 1.9s）。
+
+**落进仓库的改动**：`tools/ngp-panel/ngp-panel-restore.service` 换成修好的版本（文件里写清了
+为什么不能写 `Wants=`）；`tools/ngp-rompool.sh` 生成的 fstab 不再写 `PARTLABEL=swap`；
+`finishing_touches-rk3562.sh` 的 ngp45ht 段加 `systemctl disable emmc-swap`；
+新增 `tools/zram-swap.service` 与 `tools/ngp-bootspeed-fix.sh`。
+
+**已发布的 20261017 镜像是在这次修复之前克隆的，所以刷出来仍然是慢的**。
+已刷机的机器跑一次 `sudo ngp-bootspeed-fix.sh` 重启即可（10 秒的事，不必重刷）。
+
+**一个前置欠账**：journald 没有持久化，`journalctl --list-boots` 只有一次启动，
+事发那几次的日志拿不到，所以上面用的是 A/B 而不是翻日志。持久化 journald 仍是待办
+（`work/shpostmortem.sh` 第 1 段）——黑屏那次复盘也卡在这里。
+
 ## 2026-10-17 · 同步上游 v1.1 + 色温移植 + 中文字体
 
 **上游同步**（mamaich/dArkOS_rg52mini v1.1，`ecb0922`）：除 `.gitmodules`/`README.md` 和三个子模块指针

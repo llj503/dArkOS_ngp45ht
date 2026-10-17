@@ -3,13 +3,21 @@ Description=NGP45HT panel colour restore (VOP2 BCSH brightness/contrast/saturati
 # DRM connector properties reset to 50 on every boot, so the persisted values
 # in /opt/ngp-panel/panel.conf have to be re-applied.  Writes need no DRM
 # master and no root (card0 is group video), this is just the boot hook.
-After=dev-dri-card0.device
-Wants=dev-dri-card0.device
+#
+# DO NOT use Wants=dev-dri-card0.device here.  Wants= makes systemd create a
+# real job for the device unit, and on this box that job never completes
+# (there is no udev-triggered device unit for card0 that reaches "active" in
+# time), so the unit sat there for the full DefaultDeviceTimeoutSec (90s) and
+# added 90s to every boot.  After= alone is a pure ordering hint and costs
+# nothing, but even that is pointless here, so card0 is waited for in a
+# bounded shell loop instead.
+After=systemd-modules-load.service
 
 [Service]
 Type=oneshot
-# give the rockchip DRM driver a moment to finish binding before writing
-ExecStartPre=/bin/sleep 2
+# Give the rockchip DRM driver time to finish binding, but stop waiting after
+# 6 s instead of blocking the boot indefinitely.
+ExecStartPre=/bin/sh -c 'i=0; while [ ! -c /dev/dri/card0 ] && [ $i -lt 30 ]; do sleep 0.2; i=$((i+1)); done; exit 0'
 ExecStart=/opt/ngp-panel/paneladj.sh restore
 RemainAfterExit=yes
 

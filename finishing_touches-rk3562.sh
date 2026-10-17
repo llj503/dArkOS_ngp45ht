@@ -558,6 +558,12 @@ fi
 if [ "$UNIT" == "ngp45ht" ]; then
   bash ngp45ht/tools/ngp-panel/install.sh Arkbuild
   sudo chroot Arkbuild/ bash -c "systemctl enable ngp-panel-restore" || true
+  # The eMMC tier of the swap setup is dead weight here: this device's eMMC
+  # has no partition labelled "swap", so emmc-swap.service would start, wait
+  # for /dev/disk/by-partlabel/swap, find nothing and exit - while dragging in
+  # Wants=systemd-udev-settle.service (~1.9 s) for the privilege.  zram alone
+  # covers the 2 GB of RAM.
+  sudo chroot Arkbuild/ bash -c "systemctl disable emmc-swap" || true
 fi
 
 # Add preservation of SDL_VIDEO_EGL_DRIVER to sudoers

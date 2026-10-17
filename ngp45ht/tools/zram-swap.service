@@ -1,0 +1,31 @@
+[Unit]
+Description=Compressed swap in RAM (zram) - NGP45HT fallback
+# Fallback unit for images built BEFORE upstream v1.1, which had no zram setup
+# of its own.  Upstream ships /usr/local/sbin/zram-swap (1536M, lzo-rle,
+# priority 100) plus its own unit at exactly this path; if that script exists
+# it wins and this file is never installed.  Same path on purpose, so both
+# variants are enabled with the same `systemctl enable zram-swap`.
+#
+# Why a unit and not an fstab entry: fstab swap lines make
+# systemd-fstab-generator emit a .device unit, and waiting for a device that
+# is not there costs the full DefaultDeviceTimeoutSec (90 s) at every boot.
+# /dev/zram0 appears as soon as the zram module is loaded - no device to wait
+# for, nothing to time out.
+DefaultDependencies=no
+After=systemd-modules-load.service
+Before=swap.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# 512M is a ceiling, not a reservation: RAM is only taken as pages arrive.
+# zstd was picked over lzo-rle here because the four A53s have cycles to spare
+# at boot and the extra ratio keeps the 2 GB usable for longer; see the
+# trade-off discussion in finishing_touches-rk3562.sh's zram-swap.
+# Priority 10: no second swap tier exists on this device, so the number is
+# only there to match what the commented-out fstab line used to ask for.
+ExecStart=/bin/sh -c 'echo zstd > /sys/block/zram0/comp_algorithm; echo 536870912 > /sys/block/zram0/disksize; /sbin/mkswap -L zram0 /dev/zram0 >/dev/null; /sbin/swapon -p 10 /dev/zram0'
+ExecStop=/bin/sh -c '/sbin/swapoff /dev/zram0 >/dev/null 2>&1 || true; echo 1 > /sys/block/zram0/reset'
+
+[Install]
+WantedBy=swap.target

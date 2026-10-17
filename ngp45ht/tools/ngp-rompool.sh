@@ -45,7 +45,12 @@ $B2 $M2 vfat defaults,auto,umask=0000,iocharset=utf8,uid=1000,gid=1000,noatime,n
 $M1:$M2 $POOL fuse.mergerfs defaults,$MOPTS,nofail,x-systemd.requires=mnt-roms1.mount 0 0
 $M2 /roms2 none nofail,bind,x-systemd.requires=mnt-roms2.mount 0 0
 $POOL/tools /opt/system/Tools none nofail,x-systemd.device-timeout=7,bind,x-systemd.requires=roms.mount 0 0
-PARTLABEL=swap none swap sw,pri=10 0 0
+# No swap entry here.  The NGP45HT has no partition labelled "swap" (its
+# by-partlabel directory holds boot, dArkOS_Fat, emuelec, resource, rootfs,
+# storage, uboot), so a PARTLABEL=swap line - copy-pasted from the rg43h
+# fstab - made systemd-fstab-generator emit dev-disk-by\x2dpartlabel-swap.device
+# and wait the full 90 s DefaultDeviceTimeoutSec on every single boot.
+# Swap comes from zram instead (finishing_touches-rk3562.sh, priority 100).
 EOF
 
   cat > /usr/local/sbin/ngp-roms-fallback.sh <<'SH'

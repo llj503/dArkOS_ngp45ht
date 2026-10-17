@@ -26,6 +26,8 @@ XIFAN NGP45HT 是一款 **Rockchip RK3562** 掌机：2 GB RAM、3.7 GB eMMC、10
 | `tools/ngp-bt-agent.py` `tools/ngp-bt-agent.service` `tools/install_bt_agent.sh` | BlueZ 配对应答 agent（auto-accept，`RequestPinCode` 回 `0000`）与它的 systemd 安装器 |
 | `tools/ngp-bt-pair.sh` `tools/btpair.sh` `tools/btdump.sh` | 配对 CLI、扫描+自动挑目标配对、广播/GATT 取证 dump |
 | `tools/ngp-panel/` | **屏幕色温/画面调节**（移植自 ROCKNIX `paneladj`）：`panelprop.py`（ctypes 写 DRM 连接器属性，无需 sudo/modetest）、`paneladj.sh`（CLI）、`屏幕色温.sh`（ES 系统菜单中文前端）、`ngp-panel-restore.service`（开机重放）、`install.sh`（镜像/卡片两用）、`mkpsf.py` + `Unifont-CJK-panel.psf.gz`（512 字形位中文控制台字体）。详见 `tools/ngp-panel/README.md` |
+| `tools/ngp-bootspeed-fix.sh` `tools/zram-swap.service` | **设备侧**启动速度修复：干掉 fstab 里指向不存在分区的 swap 行（每次开机白等 `DefaultDeviceTimeoutSec` 90 秒），改用 zram；`--check` 只报告不改。幂等，20261017 及更早的镜像刷出来都能原地修（1m41.6s → 12.7s，实测 A/B 见 CHANGELOG） |
+| `tools/ngp-rompool.sh` | **设备侧**双 TF 卡合成一个 `/roms`（mergerfs）+ `/roms2` 与 `/opt/system/Tools` 绑定挂载 + 池挂了时兜底直接挂 TF1 |
 | `tools/ngp-p1-switch.sh` | 外接手柄（USB/2.4G/BLE）在场时把内建手柄解绑让出 P1，走了自动绑回；udev 事件驱动 |
 | `tools/ngp-xpad-build.sh` | 给 5.10.226 现编 `xpad.ko`（带震动）并安装 + depmod，2.4G XInput 接收器用 |
 | `tools/btaic.sh` `tools/btaic2.sh` `tools/btnotify.sh` | 厂商 `aic_btusb` 实验（含强制灌补丁）与 GATT notify/轮询抓取，全部可逆 |
@@ -396,6 +398,38 @@ fi
 改完实测：`perfmax performance` → gpu governor `simple_ondemand → performance`、**cur_freq 300 MHz → 900 MHz**
 （本机可选 300/400/…/900 MHz），cpu 与 dmc 同时进 `performance`；`perfnorm` 干净复原成
 `simple_ondemand`/300 MHz + `ondemand` + `dmc_ondemand`。备份 `*.orig-ngp`。
+
+## 启动慢：fstab 里指向不存在分区的 swap 行（90 秒 device 超时）
+
+开机要 1 分 41 秒，而 `systemd-analyze blame` 加总只有 ~20 秒的活。这个"对不上"本身就是特征：
+**差额是在等一个不存在的设备**，而 device 超时在 `blame` 里看不见（没有 unit 在忙，只是没人往下走）。
+
+```sh
+systemd-analyze time            # 4.9s (kernel) + 1min 36.7s (userspace)
+systemd-analyze critical-chain  # tmp.mount @1min30.8s  ← 它排在 swap.target 之后
+ls /dev/disk/by-partlabel/      # boot dArkOS_Fat emuelec resource rootfs storage uboot —— 没有 swap
+grep swap /etc/fstab            # PARTLABEL=swap none swap sw,pri=10 0 0
+```
+
+`PARTLABEL=swap` 那行是 rg43h fstab 的照抄（`/dev/zram0` 之外这台机器没有任何 swap 分区），
+systemd-fstab-generator 把它变成 `dev-disk-by\x2dpartlabel-swap.device` 塞进 `swap.target`，
+于是干等满 `DefaultDeviceTimeoutSec = 90s`。**注释掉它，swap 改由 zram 提供**：
+
+```sh
+sudo ngp-bootspeed-fix.sh --check   # 只报告
+sudo ngp-bootspeed-fix.sh           # 改（自动备份 fstab、装 zram、修 panel unit）
+```
+
+实测 A/B（只差这一行）：1m41.587s → **12.720s**，省 88.9 秒，两轮 `blame` 逐项几乎不动。
+
+两条通用教训：
+
+1. **`Wants=` 一个 device unit 是陷阱**。`After=` 只是排序提示、不建 job，安全；`Wants=` 会让 systemd
+   给 device unit 真的建一个 job，设备不来就等到 `DefaultDeviceTimeoutSec`。要等就自己写有上限的
+   轮询（`while [ ! -c /dev/dri/card0 ] && [ $i -lt 30 ]; do sleep 0.2; ...`），别把启动交给 systemd 的
+   设备超时。
+2. **"blame 加总 < userspace 总时长" 就是有人在等 device/mount 超时**，去查 fstab 和 `critical-chain`
+   里那个时间戳突然跳了 90 秒的地方，别在 `blame` 里找。
 
 ## 板级要点（都是量出来的，不是猜的）
 
