@@ -112,18 +112,50 @@ else
 fi
 rm -f "$RETRY"
 
-# --- 2. format it ----------------------------------------------------------
+# --- 2. unmount whatever already sits on the ROM partition ------------------
+# Order matters and 2026-10-17 got it wrong: the first version formatted first
+# and unmounted afterwards, so mkfs.exfat was pointed at a partition that was
+# still mounted at /roms (systemd's local-fs.target runs before firstboot).
+# The result was logged as a bare "mkfs.exfat FAILED" with no reason, and the
+# subsequent `mount -t exfat` failed too because the old FAT16 was still there
+# -- so the machine came up with no /roms at all.
+for m in /roms /mnt/roms1 /mnt/roms2; do
+	if mountpoint -q "$m" 2>/dev/null; then
+		umount -l "$m" >/dev/null 2>&1 && say "unmounted $m before formatting"
+	fi
+done
+
+# --- 3. format it ----------------------------------------------------------
 FSTYPE=$(lsblk -no FSTYPE "$PART" 2>/dev/null | head -1)
 if [ "${FSTYPE:-}" != "exfat" ]; then
 	say "formatting $PART as exFAT (was '${FSTYPE:-none}')"
-	/sbin/mkfs.exfat -c 16K -L EASYROMS "$PART" >/dev/null 2>&1 \
-		&& say "  mkfs.exfat ok" || say "  mkfs.exfat FAILED -- /roms stays as it is"
+	# -c takes a plain byte count here (exfatprogs does not accept "16K"), and
+	# stderr goes to the log: the bare failure on 2026-10-17 was undiagnosable.
+	if /sbin/mkfs.exfat -c 16384 -L EASYROMS "$PART" >>"$L2" 2>&1; then
+		say "  mkfs.exfat ok"; FSTYPE=exfat
+	else
+		say "  mkfs.exfat FAILED (see $L2) -- falling back to FAT32"
+		if /sbin/mkfs.vfat -F 32 -n EASYROMS "$PART" >>"$L2" 2>&1; then
+			say "  mkfs.vfat ok"; FSTYPE=vfat
+		else
+			say "  mkfs.vfat FAILED too -- giving up (boot continues without /roms)"
+			exit 1
+		fi
+	fi
 fi
 
-# --- 3. populate /roms -----------------------------------------------------
+# --- 4. populate /roms -----------------------------------------------------
 mkdir -p /roms
-mountpoint -q /roms && umount -l /roms 2>/dev/null
-if ! mount -t exfat -o umask=000,uid=1000,gid=1000,noatime "$PART" /roms 2>>"$L2"; then
+OPTS=umask=000,uid=1000,gid=1000,noatime
+# Three tries: with our options, then bare, then letting mount auto-detect.
+# A hard -t exfat here is what turned a failed mkfs into a missing /roms.
+if mount -t "${FSTYPE:-auto}" -o "$OPTS" "$PART" /roms 2>>"$L2"; then
+	:
+elif mount -t "${FSTYPE:-auto}" "$PART" /roms 2>>"$L2"; then
+	say "mounted without the umask/uid options"
+elif mount "$PART" /roms 2>>"$L2"; then
+	say "mounted with auto-detected fs type"
+else
 	say "mount of $PART at /roms FAILED -- giving up (boot continues without /roms)"
 	exit 1
 fi
@@ -161,7 +193,7 @@ if [ -z "$(ls -A /roms/themes 2>/dev/null)" ] && [ -d /home/ark/.emulationstatio
 fi
 sync
 
-# --- 4. fstab + bring the dual-card pool up --------------------------------
+# --- 5. fstab + bring the dual-card pool up --------------------------------
 if [ -x /usr/local/sbin/ngp-rompool.sh ]; then
 	say "regenerating /etc/fstab through ngp-rompool.sh (both TF slots)"
 	/usr/local/sbin/ngp-rompool.sh install >>"$L2" 2>&1 && say "  install ok" || say "  install FAILED"
@@ -170,11 +202,21 @@ if [ -x /usr/local/sbin/ngp-rompool.sh ]; then
 else
 	say "ngp-rompool.sh missing -- plain single-card fstab"
 	grep -q "^$PART" /etc/fstab 2>/dev/null || \
-		echo "$PART /roms exfat defaults,auto,umask=000,uid=1000,gid=1000,noatime,nofail 0 0" >> /etc/fstab
+		echo "$PART /roms ${FSTYPE:-auto} defaults,auto,umask=000,uid=1000,gid=1000,noatime,nofail 0 0" >> /etc/fstab
+fi
+# ngp-rompool.sh hard-codes exFAT for the TF1 ROM partition.  That is fine when
+# step 3 produced exFAT, but if we had to fall back to FAT32 the next boot would
+# try to mount it as exFAT, fail, and lose the pool -- so correct the line.
+if [ -n "${FSTYPE:-}" ] && [ "$FSTYPE" != exfat ]; then
+	awk -v p="$PART" -v t="$FSTYPE" '$1 == p && $3 != t { $3 = t } { print }' \
+		/etc/fstab > /etc/fstab.new 2>>"$L2" && mv /etc/fstab.new /etc/fstab && \
+		say "fstab: /mnt/roms1 fs type corrected to $FSTYPE"
+	systemctl daemon-reload
 fi
 if ! mountpoint -q /roms; then
 	say "pool did not come up -- falling back to $PART straight on /roms"
-	mount -t exfat -o umask=000,uid=1000,gid=1000,noatime "$PART" /roms 2>>"$L2" || say "  fallback mount FAILED"
+	mount -t "${FSTYPE:-auto}" -o umask=000,uid=1000,gid=1000,noatime "$PART" /roms 2>>"$L2" \
+		|| mount "$PART" /roms 2>>"$L2" || say "  fallback mount FAILED"
 fi
 grep -aE " /roms | /mnt/roms[12] " /proc/mounts 2>/dev/null | sed "s/^/  /" >> "$L2"
 # The sentinel is written only when p5 really is big: otherwise a card stuck on
