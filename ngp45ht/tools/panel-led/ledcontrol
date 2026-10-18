@@ -1,0 +1,103 @@
+#!/bin/sh
+# ledcontrol — XIFAN NGP45H 状态灯（双通道）
+#
+# 移植自 ROCKNIX / AURKNIX 的设备 quirk：
+#   /usr/lib/autostart/quirks/devices/Xifan NGP45H/bin/ledcontrol
+# 硬件：GPIO3_C1 = gpio113 = 蓝，GPIO3_C2 = gpio114 = 红
+#   （充电指示由硬件自己处理，故不介入 —— 与上游 011-led_control 一致）
+#
+# 用法：
+#   ledcontrol list                     # 列出可选颜色
+#   ledcontrol [off|red|blue|purple]    # 应用并持久化
+#   ledcontrol                          # 应用已持久化的颜色（开机恢复用）
+#   ledcontrol poweroff                 # 关灯
+
+CONF=/opt/ngp-panel/led.conf
+GPIO_BLUE=113
+GPIO_RED=114
+
+if [ "$1" = "list" ]; then
+	printf 'off\nred\nblue\npurple\n'
+	exit 0
+fi
+
+# 非 root 时透传 sudo（dArkOS 上 ark 免密 sudo；sysfs gpio 只有 root 可写）
+as_root() {
+	if [ "$(id -u)" = 0 ]; then
+		"$@"
+	else
+		sudo "$@"
+	fi
+}
+
+w() { # w <sysfs文件> <值>
+	if [ "$(id -u)" = 0 ]; then
+		echo "$2" > "$1" 2>/dev/null
+	else
+		sudo sh -c "echo $2 > $1" 2>/dev/null
+	fi
+}
+
+gpio_export() {
+	for g in $GPIO_BLUE $GPIO_RED; do
+		[ -d "/sys/class/gpio/gpio$g" ] || w /sys/class/gpio/export "$g"
+		w "/sys/class/gpio/gpio$g/direction" out
+		# 让 ark 之后可以直接写，避免每次都冒泡 sudo
+		[ "$(id -u)" = 0 ] && chmod 666 "/sys/class/gpio/gpio$g/value" 2>/dev/null
+	done
+}
+
+set_pair() {
+	w "/sys/class/gpio/gpio${GPIO_BLUE}/value" "$1"
+	w "/sys/class/gpio/gpio${GPIO_RED}/value" "$2"
+}
+
+apply_color() {
+	case "$1" in
+		off)    set_pair 0 0 ;;
+		blue)   set_pair 1 0 ;;
+		red)    set_pair 0 1 ;;
+		purple) set_pair 1 1 ;;
+		*)      set_pair 1 0 ;;
+	esac
+}
+
+conf_get() { # conf_get <key>
+	[ -f "$CONF" ] || return 0
+	sed -n "s/^$1=//p" "$CONF" 2>/dev/null | tail -1
+}
+
+conf_set() { # conf_set <key> <value>  —— 保留同文件里的其它键
+	# /opt/ngp-panel/led.conf 通常是 root 建的（开机恢复服务），而界面是以 ark 身份
+	# 调本脚本；临时文件放 /tmp（/opt/ngp-panel 目录不可写），落盘时非 root 走 sudo。
+	local k="$1" v="$2" tmp="/tmp/ngp-led.$$"
+	{
+		grep -v "^$k=" "$CONF" 2>/dev/null
+		echo "$k=$v"
+	} > "$tmp" 2>/dev/null || return 1
+	if [ -w "$CONF" ]; then
+		cat "$tmp" > "$CONF"
+	else
+		sudo install -m 666 "$tmp" "$CONF" 2>/dev/null || sudo sh -c "cat '$tmp' > '$CONF' && chmod 666 '$CONF'" 2>/dev/null
+	fi
+	rm -f "$tmp"
+}
+
+gpio_export
+
+case "${1:-}" in
+	poweroff)
+		apply_color off
+		;;
+	off|red|blue|purple)
+		apply_color "$1"
+		conf_set led_color "$1"
+		;;
+	"")
+		apply_color "$(conf_get led_color)"
+		;;
+	*)
+		echo "usage: ledcontrol [list|off|red|blue|purple|poweroff]" >&2
+		exit 1
+		;;
+esac

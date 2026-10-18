@@ -1,0 +1,14 @@
+[Unit]
+Description=NGP45HT WiFi watchdog (AIC8800 USB: 确保开机后 wlan0 拿到 IP)
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+# 最坏情况：60s 等待 + 20s 重连 + 9s USB 复位 + 60s = 约 150s，留余量
+TimeoutStartSec=300
+ExecStart=/usr/local/sbin/ngp-wifi-watchdog.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

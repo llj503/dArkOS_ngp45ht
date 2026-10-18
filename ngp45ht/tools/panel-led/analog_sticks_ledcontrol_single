@@ -1,0 +1,124 @@
+#!/bin/sh
+# analog_sticks_ledcontrol_single — XIFAN NGP45H 摇杆灯（WS2812）
+#
+# 移植自 ROCKNIX / AURKNIX 的设备 quirk：
+#   /usr/lib/autostart/quirks/devices/Xifan NGP45H/bin/analog_sticks_ledcontrol_single
+# 硬件：SPI0（/dev/spidev0.0）挂 WS2812 RGB，由 ws2812-common 驱动。
+#   spidev 由 rk3562-ngp45ht.dtb 的 spi@ff220000 + spi_dev@0 提供，
+#   pinctrl 用 spi0m1-pins-ngp45h（GPIO3_B4/B5 与 GPIO3_B7），与上游一致。
+#
+# 用法：
+#   analog_sticks_ledcontrol_single list          # 列出模式
+#   analog_sticks_ledcontrol_single <模式>        # 应用并持久化
+#   analog_sticks_ledcontrol_single               # 应用已持久化模式（开机恢复）
+
+CONF=/opt/ngp-panel/led.conf
+WS=/usr/bin/ws2812-common
+# ws2812-common 的 OFF 只打印后退出、不写 SPI（灯保持上一帧），所以关灯要自己发黑帧
+LEDOFF=/opt/ngp-panel/ngp-led-off
+DEV=/dev/spidev0.0
+
+if [ "${1:-}" = "list" ]; then
+	cat <<EOF
+OFF
+Scrolling
+Breathing
+Breathing_Red
+Breathing_Green
+Breathing_Blue
+Breathing_Blue_Red
+Breathing_Green_Blue
+Breathing_Red_Green
+Breathing_Red_Green_Blue
+Red_Green_Blue
+Blue_Red
+Blue
+Green_Blue
+Green
+Red_Green
+Red
+EOF
+	exit 0
+fi
+
+conf_get() {
+	[ -f "$CONF" ] || return 0
+	sed -n "s/^$1=//p" "$CONF" 2>/dev/null | tail -1
+}
+
+conf_set() { # conf_set <key> <value> —— 保留同文件里的其它键
+	# ledger 文件通常是 root 建的（开机恢复服务），而界面是以 ark 身份调本脚本；
+	# 临时文件放 /tmp（/opt/ngp-panel 目录不可写），落盘时非 root 走 sudo。
+	local k="$1" v="$2" tmp="/tmp/ngp-led.$$"
+	{
+		grep -v "^$k=" "$CONF" 2>/dev/null
+		echo "$k=$v"
+	} > "$tmp" 2>/dev/null || return 1
+	if [ -w "$CONF" ]; then
+		cat "$tmp" > "$CONF"
+	else
+		sudo install -m 666 "$tmp" "$CONF" 2>/dev/null || sudo sh -c "cat '$tmp' > '$CONF' && chmod 666 '$CONF'" 2>/dev/null
+	fi
+	rm -f "$tmp"
+}
+
+MODE="${1:-}"
+[ -n "$MODE" ] || MODE="$(conf_get stick_mode)"
+[ -n "$MODE" ] || MODE=OFF
+
+if [ ! -e "$DEV" ]; then
+	echo "analog_sticks_ledcontrol_single: $DEV 不存在（DTB 未启用 SPI0？）" >&2
+	exit 1
+fi
+[ -x "$WS" ] || { echo "analog_sticks_ledcontrol_single: 缺少 $WS" >&2; exit 1; }
+[ -x "$LEDOFF" ] || { echo "analog_sticks_ledcontrol_single: 缺少 $LEDOFF" >&2; exit 1; }
+
+[ -n "${1:-}" ] && conf_set stick_mode "$MODE"
+
+# 如果有 systemd 单元在托管，就只让它重启（否则会和我们自己 spawn 的进程打架，
+# 出现两个 ws2812-common 互相覆盖动画）
+# 注意：判据是"单元存在"，不能用 is-active —— OFF 模式下 unit 跑完就 inactive，
+# 用 is-active 会退回到自己 spawn，又变成游离进程。
+if [ -n "${1:-}" ] && [ "${NGP_STICKLED_FG:-}" != "1" ] \
+	&& command -v systemctl >/dev/null 2>&1 \
+	&& systemctl cat ngp-stickled.service >/dev/null 2>&1; then
+	# 界面是以 ark 身份调用本脚本的，restart 必须走 sudo
+	if [ "$(id -u)" = 0 ]; then
+		systemctl restart ngp-stickled.service
+	else
+		sudo systemctl restart ngp-stickled.service
+	fi
+	exit 0
+fi
+
+# 旧进程会让两路动画互相打架，先杀掉（前台模式下 systemd 负责拉起，跳过）
+if [ "${NGP_STICKLED_FG:-}" != "1" ] && command -v pidof >/dev/null 2>&1; then
+	PIDS=$(pidof ws2812-common 2>/dev/null)
+	[ -n "$PIDS" ] && kill -9 $PIDS 2>/dev/null
+fi
+
+if [ "$(id -u)" = 0 ]; then
+	RUN="$WS"
+else
+	RUN="sudo $WS"
+fi
+
+if [ "$MODE" = "OFF" ]; then
+	# 真正发一帧全黑（0xC0 * N），然后退出
+	if [ "$(id -u)" = 0 ]; then
+		"$LEDOFF" "$DEV"
+	else
+		sudo "$LEDOFF" "$DEV"
+	fi
+	exit $?
+fi
+
+if [ "${NGP_STICKLED_FG:-}" = "1" ]; then
+	# ngp-stickled.service 用 Type=simple 直接托管进程
+	exec $RUN --device "$DEV" "$MODE"
+fi
+
+# 必须断开 stdout/stderr，否则 SSH / systemd 会一直等这个常驻进程
+$RUN --device "$DEV" "$MODE" </dev/null >/dev/null 2>&1 &
+disown 2>/dev/null
+exit 0

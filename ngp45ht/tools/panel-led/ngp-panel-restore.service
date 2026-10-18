@@ -1,0 +1,25 @@
+[Unit]
+Description=NGP45HT panel colour + status LED restore
+# DRM connector properties reset to 50 on every boot, so the persisted values
+# in /opt/ngp-panel/panel.conf have to be re-applied.  Writes need no DRM
+# master and no root (card0 is group video); the LED half does need root.
+#
+# DO NOT use Wants=/After=dev-dri-card0.device here.  Wants= makes systemd
+# create a real job for the device unit, and on this box that job never
+# completes, so it sat there for the full DefaultDeviceTimeoutSec (90s) and
+# held up multi-user.target for a minute and a half.  Wait for the node with a
+# bounded shell loop instead: it costs nothing when card0 is already there and
+# can never stall the boot.
+After=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+# wait for the DRM node, 0.2s steps, at most 6s, then go anyway
+ExecStartPre=/bin/sh -c 'i=0; while [ ! -c /dev/dri/card0 ] && [ $i -lt 30 ]; do sleep 0.2; i=$((i+1)); done; exit 0'
+ExecStart=/opt/ngp-panel/paneladj.sh restore
+# 状态灯：GPIO113/114 导出 + 应用 /opt/ngp-panel/led.conf 里的颜色
+ExecStart=/usr/bin/ledcontrol
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

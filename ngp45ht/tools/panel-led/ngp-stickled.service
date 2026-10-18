@@ -1,0 +1,27 @@
+[Unit]
+Description=NGP45HT 摇杆灯 (WS2812 over SPI0 /dev/spidev0.0)
+# 摇杆灯是 SPI0 上的 WS2812，由 ws2812-common 常驻驱动；模式存
+# /opt/ngp-panel/led.conf 的 stick_mode，由面板调节界面写入。
+# spidev 出现在 modules-load 之后但可能还要几百毫秒，用有上限的轮询等，
+# 不要用 Wants=dev-spidev0.device（会给 device unit 建真 job，超时 90s）。
+After=systemd-modules-load.service
+
+[Service]
+Type=simple
+Environment=NGP_STICKLED_FG=1
+# 杀掉任何"游离"的 ws2812-common：旧版脚本曾用 `sudo ws2812-common … &` 直接拉起，
+# 那些进程不会退出，会一直占着 /dev/spidev0.0 抢 SPI —— 表现为切到某个模式以后
+# 再也调不动（2026-10-18 实测积到 45 个）。此刻本单元自己的进程还没起来，全杀是安全的。
+# 必须用 -x 精确匹配进程名；用 -f 会把执行 pkill 的那个 shell 自己也匹配上。
+ExecStartPre=-/usr/bin/pkill -9 -x ws2812-common
+# spidev 最多等 20s
+ExecStartPre=/bin/sh -c 'i=0; while [ ! -c /dev/spidev0.0 ] && [ $i -lt 100 ]; do sleep 0.2; i=$((i+1)); done; exit 0'
+ExecStart=/usr/bin/analog_sticks_ledcontrol_single
+# 停不下来就强杀，避免"卡在半死"的旧实例继续占 SPI
+TimeoutStopSec=5
+KillSignal=SIGKILL
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

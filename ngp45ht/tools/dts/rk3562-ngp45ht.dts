@@ -715,4 +715,39 @@
 			rockchip,pins = <3 RK_PB0 RK_FUNC_GPIO &pcfg_pull_none>;
 		};
 	};
+
+	/*
+	 * 摇杆灯（WS2812）走 SPI0，只要 MOSI + CLK 两根线。
+	 * 引脚取自 AURKNIX/ROCKNIX 同款设备的 quirk（spi0m1-pins-ngp45h）：
+	 * GPIO3_B5 与 GPIO3_B4。
+	 *
+	 * 故意不接 CS：AURKNIX 那组里的 CS 是 GPIO3_B7，而这根脚在本机同时是
+	 * i2c4（板上挂 rk628 HDMI 桥）的 SDA —— spi 一抢，i2c-4 就注册不上，
+	 * HDMI 直接废掉。WS2812 根本没有 CS，所以不要它。
+	 */
+	spi0-ngp45h {
+		ngp_spi0_pins: spi0m1-pins-ngp45h {
+			rockchip,pins =
+				<3 RK_PB5 4 &pcfg_pull_none>,
+				<3 RK_PB4 4 &pcfg_pull_none>;
+		};
+	};
+};
+
+/*
+ * SPI0 —— 摇杆灯（WS2812）。
+ * 用户态由 /usr/bin/ws2812-common --device /dev/spidev0.0 <模式> 驱动，
+ * 见 /usr/bin/analog_sticks_ledcontrol_single。
+ * 8 MHz 与 AURKNIX 的 spi-max-frequency 一致。
+ */
+&spi0 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&ngp_spi0_pins>;
+
+	spi_dev@0 {
+		compatible = "rockchip,spidev";
+		reg = <0>;
+		spi-max-frequency = <8000000>;
+	};
 };

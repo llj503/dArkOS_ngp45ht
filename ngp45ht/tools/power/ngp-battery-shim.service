@@ -1,0 +1,14 @@
+[Unit]
+Description=NGP45HT 电池状态修正（覆盖 RK817 永远报 Charging 的 battery/status）
+# 必须在 ES 起来之前挂好，ES 启动时就读 status 决定画不画闪电
+Before=emulationstation.service
+After=systemd-udevd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/ngp-battery-shim.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

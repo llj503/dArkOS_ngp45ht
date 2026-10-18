@@ -18,7 +18,7 @@ changed=0
 
 # Distro version shown by EmulationStation as "distro version" at the bottom of
 # the main menu.  Bump this whenever the image is re-rolled.
-DISTRO_VERSION=10172026
+DISTRO_VERSION=10182026
 
 L1=/boot/ngp-firstboot.log
 L2=/var/log/ngp-firstboot.log
@@ -89,6 +89,16 @@ if [ "$(cat "$V" 2>/dev/null)" != "$DISTRO_VERSION" ]; then
 	echo "$DISTRO_VERSION" > "$V"
 	chown ark:ark "$V" 2>/dev/null || true
 	say "VERSION -> $DISTRO_VERSION"
+	changed=1
+fi
+
+# ES 的「Distro Version」其实不是读 .VERSION：GuiMenu::addVersionInfo() 执行的是
+#   cat /usr/share/plymouth/themes/text.plymouth | grep title | cut -c 7-50
+# 所以这里必须同步 plymouth 的 title，否则界面上永远是镜像构建那天的日期。
+PLY=/usr/share/plymouth/themes/text.plymouth
+if [ -f "$PLY" ] && ! grep -q "title=.*($DISTRO_VERSION)" "$PLY"; then
+	sed -i "s/^title=.*/title=dArkOS ($DISTRO_VERSION)/" "$PLY"
+	say "plymouth title -> dArkOS ($DISTRO_VERSION)"
 	changed=1
 fi
 
